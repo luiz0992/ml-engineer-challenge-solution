@@ -1,0 +1,64 @@
+# ---------------------------------------------------------------------------
+# Serving + development dependencies, for the `pip install -r requirements.txt`
+# flow given in the challenge README.
+#
+# `pyproject.toml` is the source of truth and is what CI and the Docker images
+# use (via uv, with a locked resolution in `uv.lock`). This file is maintained
+# for parity with the documented setup instructions.
+#
+# The heavy training stack (torch, torchvision, transformers, CUDA) is kept in
+# `requirements-train.txt` so the serving image stays small.
+# ---------------------------------------------------------------------------
+
+# --- API layer -------------------------------------------------------------
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.9
+pydantic-settings>=2.6
+python-multipart>=0.0.12
+httpx>=0.27
+
+# --- Auth ------------------------------------------------------------------
+pyjwt>=2.9
+passlib[argon2]>=1.7.4
+
+# --- Persistence & cache ---------------------------------------------------
+sqlalchemy[asyncio]>=2.0.36
+asyncpg>=0.30
+psycopg[binary]>=3.2
+alembic>=1.14
+redis[hiredis]>=5.2
+
+# --- Background jobs -------------------------------------------------------
+celery[redis]>=5.4
+flower>=2.0
+
+# --- Observability ---------------------------------------------------------
+prometheus-client>=0.21
+structlog>=24.4
+
+# --- Imaging ---------------------------------------------------------------
+pillow>=11.0
+numpy>=1.26,<2.3
+opencv-python-headless>=4.10
+
+# --- Inference runtime -----------------------------------------------------
+onnxruntime>=1.20
+onnx>=1.17
+
+# --- Similarity search -----------------------------------------------------
+faiss-cpu>=1.9
+
+# --- Testing & tooling -----------------------------------------------------
+pytest>=8.3
+pytest-asyncio>=0.24
+pytest-cov>=6.0
+pytest-mock>=3.14
+pytest-benchmark>=5.1
+anyio>=4.6
+fakeredis>=2.26
+testcontainers[postgres,redis]>=4.8
+locust>=2.32
+ruff>=0.8
+mypy>=1.13
+psutil>=6.1
