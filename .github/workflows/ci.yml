@@ -1,0 +1,258 @@
+# Continuous integration.
+#
+# Fast checks first: lint and type-check finish in under a minute and catch the
+# majority of problems, so a broken formatting run does not wait behind a
+# five-minute test job. Jobs that can run concurrently do.
+#
+# The test job runs against real Postgres and Redis services rather than mocks,
+# because the sliding-window rate limiter is a Lua script and the audit trail is
+# SQL -- neither is meaningfully exercised against a stand-in.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch. Without this, pushing three times
+# in a minute queues three full pipelines and the first two are wasted.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.9.6"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: Lint and type-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        # --no-install-project: the checks need the dependencies, not a built
+        # wheel of our own package.
+        run: uv sync --extra dev --frozen
+
+      - name: Ruff lint
+        run: uv run ruff check --output-format=github .
+
+      - name: Ruff format
+        run: uv run ruff format --check .
+
+      - name: Type-check
+        run: uv run mypy api worker scripts
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: mlapi
+          POSTGRES_PASSWORD: ci-password
+          POSTGRES_DB: mlapi
+        ports: ["5432:5432"]
+        # Without a health check the job races the database's initialisation
+        # and fails intermittently, which is worse than failing consistently.
+        options: >-
+          --health-cmd "pg_isready -U mlapi -d mlapi"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      APP_ENV: development
+      LOG_FORMAT: console
+      POSTGRES_HOST: localhost
+      POSTGRES_USER: mlapi
+      POSTGRES_PASSWORD: ci-password
+      POSTGRES_DB: mlapi
+      REDIS_HOST: localhost
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        # The training extra (torch, CUDA) is deliberately excluded: the suite
+        # runs against a synthetic ONNX model, so pulling several gigabytes of
+        # GPU wheels would add minutes to every run for tests that skip anyway.
+        run: uv sync --extra dev --frozen
+
+      - name: Verify migrations apply and reverse
+        # A migration that cannot be rolled back is a production trap, and the
+        # cheapest place to discover that is here.
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+
+      - name: Run tests
+        run: |
+          uv run pytest \
+            --cov=api \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=90 \
+            --junitxml=junit.xml \
+            -v
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage.xml
+            junit.xml
+          retention-days: 14
+
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev --frozen
+
+      - name: Audit dependencies for known vulnerabilities
+        # Advisory rather than blocking: a CVE in a transitive dependency with
+        # no available fix would otherwise block every unrelated pull request.
+        # It is surfaced in the job summary and triaged deliberately.
+        continue-on-error: true
+        run: |
+          uvx pip-audit --desc --format columns 2>&1 | tee audit.txt
+          {
+            echo "### Dependency audit"
+            echo '```'
+            cat audit.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Scan for hardcoded secrets
+        # Blocking: a committed credential must never merge, and unlike a CVE
+        # there is always an immediate fix.
+        run: |
+          uv run ruff check --select S105,S106,S107 --output-format=github .
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # Only after the fast checks pass: an image build is the most expensive
+    # job here and there is no point building code that fails to lint.
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: api
+          tags: mlchal-api:${{ github.sha }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: worker
+          tags: mlchal-worker:${{ github.sha }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image hardening
+        # Asserts the properties the Dockerfile claims. A base image change
+        # that silently reverts to root would otherwise ship unnoticed.
+        run: |
+          set -euo pipefail
+
+          user=$(docker run --rm mlchal-api:${{ github.sha }} id -un)
+          if [ "$user" = "root" ]; then
+            echo "::error::The API image runs as root"
+            exit 1
+          fi
+          echo "Runs as: $user"
+
+          # The serving image must not carry the training stack. This is worth
+          # asserting because an accidental import in api/ would pull torch
+          # into the image and roughly quadruple its size.
+          if docker run --rm mlchal-api:${{ github.sha }} python -c "import torch" 2>/dev/null; then
+            echo "::error::torch is present in the serving image"
+            exit 1
+          fi
+          echo "torch absent, as intended"
+
+          size=$(docker image inspect mlchal-api:${{ github.sha }} --format='{{.Size}}')
+          echo "Image size: $((size / 1024 / 1024)) MB"
+          if [ "$size" -gt 1610612736 ]; then
+            echo "::error::Image exceeds 1.5 GB"
+            exit 1
+          fi
+
+      - name: Validate Compose configuration
+        run: |
+          set -euo pipefail
+
+          JWT_SECRET_KEY=ci POSTGRES_PASSWORD=ci \
+            docker compose config --quiet
+          echo "Development stack is valid"
+
+          # The production overlay must refuse to render without secrets. A
+          # deploy that silently falls back to a development credential is the
+          # failure this check exists to prevent.
+          if JWT_SECRET_KEY=ci POSTGRES_PASSWORD=ci \
+               docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+               config --quiet 2>/dev/null; then
+            echo "::error::The production overlay rendered without REDIS_PASSWORD or GRAFANA_PASSWORD"
+            exit 1
+          fi
+          echo "Production overlay correctly requires its secrets"
+
+          JWT_SECRET_KEY=ci POSTGRES_PASSWORD=ci REDIS_PASSWORD=ci GRAFANA_PASSWORD=ci \
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+          echo "Production stack is valid when secrets are supplied"

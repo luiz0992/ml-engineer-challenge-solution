@@ -1,0 +1,1660 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Multi-Model Computer Vision API",
+    "description": "\nMulti-model computer vision API serving image classification, object detection,\nand batch inference.\n\n## Authentication\n\nExchange an API key for a bearer token at `POST /api/v1/auth/token`, then send\n`Authorization: Bearer <token>` on every request.\n\n## Rate limits\n\nApplied per user tier and reported in `X-RateLimit-Limit` and\n`X-RateLimit-Remaining` on every response. A rejected request returns 429 with\n`Retry-After`.\n\n| Tier | Requests / minute |\n| --- | --- |\n| free | 10 |\n| pro | 120 |\n| enterprise | 1200 |\n\n## Correlation\n\nEvery response carries `X-Correlation-ID`. Supply your own to have it adopted;\nquote it when reporting a problem.\n",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/auth/token": {
+      "post": {
+        "tags": [
+          "authentication"
+        ],
+        "summary": "Exchange an API key for an access token",
+        "description": "Exchange a long-lived API key for a short-lived bearer token.\n\nThe token carries the caller's tier, which determines their rate limit.\nShort lifetimes mean a leaked token stops working on its own, without\nneeding the underlying key to be rotated.",
+        "operationId": "issue_token_api_v1_auth_token_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unknown API key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/classify": {
+      "post": {
+        "tags": [
+          "classification"
+        ],
+        "summary": "Classify an image",
+        "description": "Classify a single image and return ranked predictions.\n\nRequires a bearer token. Rate limits apply per user tier and are reported\nin the ``X-RateLimit-*`` response headers.",
+        "operationId": "classify_image_api_v1_classify_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "top_k",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Predictions to return.",
+              "default": 5,
+              "title": "Top K"
+            },
+            "description": "Predictions to return."
+          },
+          {
+            "name": "model_version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Pin a model version. Defaults to the active one.",
+              "title": "Model Version"
+            },
+            "description": "Pin a model version. Defaults to the active one."
+          },
+          {
+            "name": "include_probabilities",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true,
+              "title": "Include Probabilities"
+            }
+          },
+          {
+            "name": "use_cache",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Set false to bypass the result cache.",
+              "default": true,
+              "title": "Use Cache"
+            },
+            "description": "Set false to bypass the result cache."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_classify_image_api_v1_classify_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClassificationResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Upload too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid or unsupported image",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No model backend available",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/detect": {
+      "post": {
+        "tags": [
+          "detection"
+        ],
+        "summary": "Detect objects in an image",
+        "description": "Detect objects and return labelled bounding boxes.\n\nBoxes are in absolute pixel coordinates of the uploaded image, so a client\ncan overlay them without knowing how the image was resized internally.\n\nReturns 503 rather than 404 when no detector is deployed: a caller must be\nable to distinguish \"not available here\" from \"wrong URL\".",
+        "operationId": "detect_objects_api_v1_detect_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "confidence_threshold",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "description": "Discard detections below this score.",
+              "default": 0.5,
+              "title": "Confidence Threshold"
+            },
+            "description": "Discard detections below this score."
+          },
+          {
+            "name": "max_detections",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 300,
+              "minimum": 1,
+              "description": "Cap on returned detections.",
+              "default": 100,
+              "title": "Max Detections"
+            },
+            "description": "Cap on returned detections."
+          },
+          {
+            "name": "model_version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Model Version"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_detect_objects_api_v1_detect_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetectionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "503": {
+            "description": "Detection model not deployed in this environment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/batch": {
+      "post": {
+        "tags": [
+          "batch"
+        ],
+        "summary": "Submit a batch job",
+        "description": "Queue images for background processing.\n\nReturns 202 with a job ID immediately; the work happens in a Celery worker.\nPoll ``status_url`` for progress and results.",
+        "operationId": "submit_batch_api_v1_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchJobResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid request or batch too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/batch/{job_id}": {
+      "get": {
+        "tags": [
+          "batch"
+        ],
+        "summary": "Check batch job status",
+        "description": "Return progress and, once finished, per-item results.",
+        "operationId": "get_batch_status_api_v1_batch__job_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchJobStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Service health",
+        "description": "Report aggregate health and the state of each dependency.\n\nDistinguishes ``degraded`` from ``unhealthy`` deliberately. If the cache is\ndown but models still serve, the service is usable and must stay in the\nload balancer; reporting that as unhealthy would take down a working\nservice. Only the loss of inference itself is ``unhealthy``.",
+        "operationId": "health_api_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/health/live": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Liveness probe",
+        "description": "Returns 200 whenever the process is running.",
+        "operationId": "liveness_api_v1_health_live_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Liveness Api V1 Health Live Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/health/ready": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Readiness probe",
+        "description": "Readiness probe: is this instance able to serve traffic?\n\nReturns 503 until a model is loaded, so the orchestrator withholds traffic\nduring the startup window rather than routing requests that would fail.",
+        "operationId": "readiness_api_v1_health_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Readiness Api V1 Health Ready Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/models": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Registered models",
+        "description": "List every registered model version and its metadata.",
+        "operationId": "list_models_api_v1_models_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/metrics": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Prometheus metrics",
+        "description": "Expose metrics in Prometheus text format.\n\nUnauthenticated, which is the convention for a scrape endpoint: Prometheus\ndoes not carry bearer tokens, and the endpoint is expected to be reachable\nonly from inside the deployment network. The Compose and nginx\nconfigurations do not expose it publicly.",
+        "operationId": "metrics_api_v1_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/plain; version=1.0.0; charset=utf-8": {}
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Service health",
+        "description": "Report aggregate health and the state of each dependency.\n\nDistinguishes ``degraded`` from ``unhealthy`` deliberately. If the cache is\ndown but models still serve, the service is usable and must stay in the\nload balancer; reporting that as unhealthy would take down a working\nservice. Only the loss of inference itself is ``unhealthy``.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/live": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Liveness probe",
+        "description": "Returns 200 whenever the process is running.",
+        "operationId": "liveness_health_live_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Liveness Health Live Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Readiness probe",
+        "description": "Readiness probe: is this instance able to serve traffic?\n\nReturns 503 until a model is loaded, so the orchestrator withholds traffic\nduring the startup window rather than routing requests that would fail.",
+        "operationId": "readiness_health_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Readiness Health Ready Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Registered models",
+        "description": "List every registered model version and its metadata.",
+        "operationId": "list_models_models_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "operations"
+        ],
+        "summary": "Prometheus metrics",
+        "description": "Expose metrics in Prometheus text format.\n\nUnauthenticated, which is the convention for a scrape endpoint: Prometheus\ndoes not carry bearer tokens, and the endpoint is expected to be reachable\nonly from inside the deployment network. The Compose and nginx\nconfigurations do not expose it publicly.",
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/plain; version=1.0.0; charset=utf-8": {}
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BatchItem": {
+        "properties": {
+          "image_url": {
+            "type": "string",
+            "title": "Image Url",
+            "description": "HTTP(S) URL of the image to process."
+          },
+          "item_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Id",
+            "description": "Caller-supplied identifier, echoed back in results."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "image_url"
+        ],
+        "title": "BatchItem",
+        "description": "One image in a batch request.\n\nImages are supplied as URLs rather than inline base64. Base64 inflates the\npayload by a third and forces the whole batch into memory at once; URLs let\nthe worker fetch lazily and keep the submitting request small."
+      },
+      "BatchItemResult": {
+        "properties": {
+          "item_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Id"
+          },
+          "image_url": {
+            "type": "string",
+            "title": "Image Url"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "'succeeded' or 'failed'."
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "image_url",
+          "status"
+        ],
+        "title": "BatchItemResult",
+        "description": "Outcome for one item in a batch.\n\nCarries either ``result`` or ``error``, never both. One bad image must not\nfail an otherwise successful batch, so failures are reported per item."
+      },
+      "BatchJobResponse": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "task": {
+            "$ref": "#/components/schemas/TaskType"
+          },
+          "total_items": {
+            "type": "integer",
+            "title": "Total Items"
+          },
+          "submitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Submitted At"
+          },
+          "status_url": {
+            "type": "string",
+            "title": "Status Url",
+            "description": "Poll this URL for progress and results."
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "status",
+          "task",
+          "total_items",
+          "submitted_at",
+          "status_url"
+        ],
+        "title": "BatchJobResponse",
+        "description": "Acknowledgement of a submitted batch job."
+      },
+      "BatchJobStatusResponse": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "title": "Job Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "task": {
+            "$ref": "#/components/schemas/TaskType"
+          },
+          "total_items": {
+            "type": "integer",
+            "title": "Total Items"
+          },
+          "completed_items": {
+            "type": "integer",
+            "title": "Completed Items"
+          },
+          "failed_items": {
+            "type": "integer",
+            "title": "Failed Items"
+          },
+          "submitted_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Submitted At"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "results": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/BatchItemResult"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Results",
+            "description": "Populated once the job reaches a terminal state."
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "job_id",
+          "status",
+          "task",
+          "total_items",
+          "completed_items",
+          "failed_items",
+          "submitted_at"
+        ],
+        "title": "BatchJobStatusResponse",
+        "description": "Progress and, once finished, results of a batch job."
+      },
+      "BatchRequest": {
+        "properties": {
+          "task": {
+            "$ref": "#/components/schemas/TaskType",
+            "default": "classification"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BatchItem"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Items",
+            "description": "Images to process."
+          },
+          "classification_options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClassificationOptions"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "detection_options": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DetectionOptions"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "callback_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Callback Url",
+            "description": "Optional URL notified with the result when the job finishes."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "BatchRequest",
+        "description": "Submit images for asynchronous batch processing."
+      },
+      "Body_classify_image_api_v1_classify_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "description": "Image to classify (JPEG, PNG, WebP, or BMP)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_classify_image_api_v1_classify_post"
+      },
+      "Body_detect_objects_api_v1_detect_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "description": "Image to run detection on."
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_detect_objects_api_v1_detect_post"
+      },
+      "BoundingBox": {
+        "properties": {
+          "x_min": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "X Min"
+          },
+          "y_min": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Y Min"
+          },
+          "x_max": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "X Max"
+          },
+          "y_max": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Y Max"
+          }
+        },
+        "type": "object",
+        "required": [
+          "x_min",
+          "y_min",
+          "x_max",
+          "y_max"
+        ],
+        "title": "BoundingBox",
+        "description": "Axis-aligned box in absolute pixel coordinates of the original image.\n\nAbsolute rather than normalised coordinates: callers overlay these on the\nimage they uploaded, and normalised values would require every client to\nknow and reapply the original dimensions."
+      },
+      "ClassificationOptions": {
+        "properties": {
+          "top_k": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Top K",
+            "description": "Number of ranked predictions to return.",
+            "default": 5
+          },
+          "model_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Version",
+            "description": "Pin a specific model version. Defaults to the active version."
+          },
+          "include_probabilities": {
+            "type": "boolean",
+            "title": "Include Probabilities",
+            "description": "Include softmax probabilities alongside labels.",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ClassificationOptions",
+        "description": "Options for a classification request."
+      },
+      "ClassificationResponse": {
+        "properties": {
+          "predictions": {
+            "items": {
+              "$ref": "#/components/schemas/Prediction"
+            },
+            "type": "array",
+            "title": "Predictions"
+          },
+          "inference_time_ms": {
+            "type": "number",
+            "title": "Inference Time Ms",
+            "description": "Preprocessing plus forward pass."
+          },
+          "correlation_id": {
+            "type": "string",
+            "title": "Correlation Id"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ModelProvenance"
+          },
+          "cached": {
+            "type": "boolean",
+            "title": "Cached",
+            "description": "Whether this result was served from cache.",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "predictions",
+          "inference_time_ms",
+          "correlation_id",
+          "provenance"
+        ],
+        "title": "ClassificationResponse",
+        "description": "Result of a single-image classification."
+      },
+      "ComponentHealth": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "healthy": {
+            "type": "boolean",
+            "title": "Healthy"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "healthy"
+        ],
+        "title": "ComponentHealth",
+        "description": "Health of one dependency."
+      },
+      "Detection": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "class_id": {
+            "type": "integer",
+            "title": "Class Id"
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence"
+          },
+          "box": {
+            "$ref": "#/components/schemas/BoundingBox"
+          }
+        },
+        "type": "object",
+        "required": [
+          "label",
+          "class_id",
+          "confidence",
+          "box"
+        ],
+        "title": "Detection",
+        "description": "One detected object."
+      },
+      "DetectionOptions": {
+        "properties": {
+          "confidence_threshold": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence Threshold",
+            "description": "Discard detections scoring below this threshold.",
+            "default": 0.5
+          },
+          "max_detections": {
+            "type": "integer",
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Max Detections",
+            "description": "Cap on returned detections, highest scoring first.",
+            "default": 100
+          },
+          "model_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Version"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "DetectionOptions",
+        "description": "Options for an object-detection request."
+      },
+      "DetectionResponse": {
+        "properties": {
+          "detections": {
+            "items": {
+              "$ref": "#/components/schemas/Detection"
+            },
+            "type": "array",
+            "title": "Detections"
+          },
+          "image_width": {
+            "type": "integer",
+            "title": "Image Width"
+          },
+          "image_height": {
+            "type": "integer",
+            "title": "Image Height"
+          },
+          "inference_time_ms": {
+            "type": "number",
+            "title": "Inference Time Ms"
+          },
+          "correlation_id": {
+            "type": "string",
+            "title": "Correlation Id"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ModelProvenance"
+          },
+          "cached": {
+            "type": "boolean",
+            "title": "Cached",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "detections",
+          "image_width",
+          "image_height",
+          "inference_time_ms",
+          "correlation_id",
+          "provenance"
+        ],
+        "title": "DetectionResponse",
+        "description": "Result of a single-image object detection."
+      },
+      "ErrorDetail": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "details": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Details"
+          },
+          "correlation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correlation Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorDetail",
+        "description": "Body of an error response."
+      },
+      "ErrorResponse": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "title": "ErrorResponse",
+        "description": "Envelope returned for every error."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "uptime_seconds": {
+            "type": "number",
+            "title": "Uptime Seconds"
+          },
+          "components": {
+            "items": {
+              "$ref": "#/components/schemas/ComponentHealth"
+            },
+            "type": "array",
+            "title": "Components"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "version",
+          "uptime_seconds",
+          "components"
+        ],
+        "title": "HealthResponse",
+        "description": "Aggregate service health.\n\n``status`` is ``healthy``, ``degraded``, or ``unhealthy``. The middle state\nmatters operationally: if the cache is down but models still serve, the\nservice is usable and should not be removed from the load balancer, but the\ncondition must still be visible."
+      },
+      "JobStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "running",
+          "completed",
+          "failed",
+          "cancelled"
+        ],
+        "title": "JobStatus",
+        "description": "Lifecycle of an asynchronous batch job."
+      },
+      "ModelInfo": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "task": {
+            "$ref": "#/components/schemas/TaskType"
+          },
+          "backend": {
+            "type": "string",
+            "title": "Backend"
+          },
+          "loaded": {
+            "type": "boolean",
+            "title": "Loaded",
+            "description": "Whether the model is resident and ready."
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active",
+            "description": "Whether this version serves unpinned requests."
+          },
+          "num_classes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Num Classes"
+          },
+          "input_size": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Size"
+          },
+          "artifact_size_mb": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Size Mb"
+          },
+          "metrics": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Metrics"
+          },
+          "loaded_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Loaded At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "version",
+          "task",
+          "backend",
+          "loaded",
+          "is_active"
+        ],
+        "title": "ModelInfo",
+        "description": "Metadata for one registered model version."
+      },
+      "ModelProvenance": {
+        "properties": {
+          "model_name": {
+            "type": "string",
+            "title": "Model Name"
+          },
+          "model_version": {
+            "type": "string",
+            "title": "Model Version"
+          },
+          "backend": {
+            "type": "string",
+            "title": "Backend",
+            "description": "Runtime used, e.g. onnx, onnx-int8, tensorrt."
+          }
+        },
+        "type": "object",
+        "required": [
+          "model_name",
+          "model_version",
+          "backend"
+        ],
+        "title": "ModelProvenance",
+        "description": "Identifies the artefact that produced a result."
+      },
+      "ModelsResponse": {
+        "properties": {
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelInfo"
+            },
+            "type": "array",
+            "title": "Models"
+          },
+          "default_backend": {
+            "type": "string",
+            "title": "Default Backend"
+          }
+        },
+        "type": "object",
+        "required": [
+          "models",
+          "default_backend"
+        ],
+        "title": "ModelsResponse",
+        "description": "All registered models."
+      },
+      "Prediction": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "description": "Human-readable class name."
+          },
+          "class_id": {
+            "type": "integer",
+            "title": "Class Id",
+            "description": "Model output index."
+          },
+          "wnid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wnid",
+            "description": "WordNet identifier."
+          },
+          "probability": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Probability",
+            "description": "Softmax probability."
+          }
+        },
+        "type": "object",
+        "required": [
+          "label",
+          "class_id"
+        ],
+        "title": "Prediction",
+        "description": "One ranked classification result."
+      },
+      "TaskType": {
+        "type": "string",
+        "enum": [
+          "classification",
+          "detection",
+          "embedding"
+        ],
+        "title": "TaskType",
+        "description": "Inference task."
+      },
+      "TokenRequest": {
+        "properties": {
+          "api_key": {
+            "type": "string",
+            "minLength": 8,
+            "title": "Api Key",
+            "description": "Issued API key."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "api_key"
+        ],
+        "title": "TokenRequest",
+        "description": "Exchange an API key for a short-lived access token."
+      },
+      "TokenResponse": {
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "title": "Access Token"
+          },
+          "token_type": {
+            "type": "string",
+            "title": "Token Type",
+            "default": "bearer"
+          },
+          "expires_in": {
+            "type": "integer",
+            "title": "Expires In",
+            "description": "Token lifetime in seconds."
+          },
+          "tier": {
+            "type": "string",
+            "title": "Tier"
+          }
+        },
+        "type": "object",
+        "required": [
+          "access_token",
+          "expires_in",
+          "tier"
+        ],
+        "title": "TokenResponse",
+        "description": "An issued access token."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}

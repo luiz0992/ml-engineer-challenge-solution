@@ -4,8 +4,10 @@ A production-oriented MLOps system that serves three computer-vision models —
 image classification, object detection, and image similarity search — behind a
 single authenticated, rate-limited, observable HTTP API.
 
-> **Status:** in development. Sections marked _TBD_ are filled in as each layer
-> lands; see [Project layout](#project-layout) for what currently exists.
+Classification and object detection are served today; image similarity search
+was scoped but not implemented. See
+[What is missing](docs/technical-writeup.md#7-what-is-missing-and-why) for an
+explicit list of gaps.
 
 ---
 
@@ -370,10 +372,30 @@ This fails *silently* — it raises no error, and reported validation accuracy
 becomes meaningless. `ml/data/` restructures the validation split into proper
 per-class directories before loading.
 
-## Design decisions
+## Documentation
 
-Rationale for model selection, optimisation strategy, and system architecture
-lives in [`docs/technical-writeup.md`](docs/technical-writeup.md). _TBD._
+| Document | Contents |
+| --- | --- |
+| [Technical write-up](docs/technical-writeup.md) | Model selection, optimisation results, architecture decisions, scalability, and an explicit list of gaps |
+| [Model card: classifier](docs/model-card-classifier.md) | Metrics, training procedure, limitations, ethical considerations |
+| [Model card: detector](docs/model-card-detector.md) | RT-DETR provenance, licensing rationale, limitations |
+| [Benchmark results](benchmarks/README.md) | Generated latency matrix across backends |
+| [Benchmark analysis](benchmarks/ANALYSIS.md) | Interpretation and deployment recommendation |
+| [OpenAPI spec](docs/openapi.json) | Exported schema; also served live at `/openapi.json` |
+
+Four silent bugs found during development — two preprocessing defects, a
+backend that created a working session but could not infer, and a metrics
+mislabelling that made every dashboard useless — are written up in
+[section 4](docs/technical-writeup.md#4-four-bugs-worth-reporting).
+
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs four jobs: lint and
+type-check; tests against real Postgres and Redis services with a 90% coverage
+gate and a migration up/down/up cycle; a dependency and secret scan; and a
+Docker build that asserts the image runs as non-root, stays under 1.5 GB,
+contains no torch, and that the production Compose overlay refuses to render
+without its secrets.
 
 ## Licence
 
