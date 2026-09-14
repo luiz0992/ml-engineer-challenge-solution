@@ -109,7 +109,10 @@ class CacheService:
                 json.dumps(value, default=str),
                 ex=ttl_seconds or self.ttl_seconds,
             )
-        except (RedisError, TypeError) as exc:
+        except (RedisError, TypeError, ValueError) as exc:
+            # ValueError as well as TypeError: json.dumps raises ValueError on a
+            # circular reference, and a cache that cannot serialise a value must
+            # still not fail the request it was asked to speed up.
             self.errors += 1
             logger.warning("cache_set_failed", error=str(exc), key=key)
             return False

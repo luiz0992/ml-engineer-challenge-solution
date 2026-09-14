@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Run the test suite.
+#
+#   scripts/test                 unit + integration with coverage
+#   scripts/test --performance   include the performance suite
+#   scripts/test --fast          skip coverage, for a tight edit loop
+#   scripts/test tests/unit/...  forward any pytest arguments
+#
+# Performance tests are excluded by default: they are slower and their
+# thresholds depend on the host, so they belong in a deliberate run rather than
+# in the loop a developer repeats every few minutes.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+COVERAGE=(--cov=api --cov-report=term-missing --cov-report=html --cov-fail-under=90)
+MARKERS=()
+ARGS=()
+
+for arg in "$@"; do
+    case "$arg" in
+        --performance) MARKERS=(-m performance) ;;
+        --all)         MARKERS=(-m "") ;;
+        --fast)        COVERAGE=() ;;
+        *)             ARGS+=("$arg") ;;
+    esac
+done
+
+exec uv run pytest "${COVERAGE[@]}" ${MARKERS[@]+"${MARKERS[@]}"} ${ARGS[@]+"${ARGS[@]}"}

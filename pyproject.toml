@@ -95,7 +95,9 @@ dev = [
     "pytest-mock>=3.14",
     "pytest-benchmark>=5.1",
     "anyio>=4.6",
-    "fakeredis>=2.26",
+    # lupa provides fakeredis' Lua interpreter. Without it, EVALSHA fails and
+    # the rate limiter silently fails open, so its tests would pass vacuously.
+    "fakeredis[lua]>=2.26",
     "testcontainers[postgres,redis]>=4.8",
     "locust>=2.32",
     "ruff>=0.8",
@@ -146,7 +148,10 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Tests legitimately use asserts, bind to all interfaces, and take fixtures
 # they do not reference by name.
-"tests/**" = ["S101", "S104", "S105", "S106", "ARG001", "ARG002"]
+# RUF012: test doubles use plain class attributes to mirror the shape of the
+# objects they stand in for; ClassVar annotations would add noise without
+# changing behaviour.
+"tests/**" = ["S101", "S104", "S105", "S106", "ARG001", "ARG002", "RUF012"]
 # FastAPI route signatures declare dependencies that are injected for their
 # side effects (authentication, rate limiting) and query parameters that exist
 # to document the API contract. Starlette exception handlers must accept
@@ -174,6 +179,9 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
+    # Performance tests are excluded by default: they are slower and their
+    # thresholds are host-dependent. Run them with `-m performance`.
+    "-m", "not performance",
 ]
 markers = [
     "unit: fast, fully isolated tests with no external dependencies",
