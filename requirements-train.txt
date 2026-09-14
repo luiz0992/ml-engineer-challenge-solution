@@ -27,3 +27,5 @@ requests>=2.32
 
 # GPU execution provider for ONNX Runtime, used by the benchmark harness.
 onnxruntime-gpu>=1.20
+# Required by torch>=2.6's ONNX exporter, which routes through TorchDynamo.
+onnxscript>=0.1
