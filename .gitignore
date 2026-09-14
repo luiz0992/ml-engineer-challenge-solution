@@ -46,6 +46,12 @@ models/artifacts/*
 # Benchmark *reports* are committed (they are deliverables); raw traces are not.
 benchmarks/raw/
 
+# --- Experiment tracking --------------------------------------------------
+# MLflow's tracking DB lives under models/artifacts/, but its *artifact* store
+# defaults to a top-level mlruns/ directory holding model binaries.
+/mlruns/
+*.db
+
 # --- Local state ----------------------------------------------------------
 .local/
 /logs/

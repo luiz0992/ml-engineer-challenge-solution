@@ -1,0 +1,114 @@
+# Fine-tune an ImageNet-pretrained ViT-Small on Tiny-ImageNet.
+#
+# Override any value from the command line, e.g.:
+#   uv run python -m models.training.train training.epochs=10 dataloader.batch_size_train=256
+#
+# The `train_config_schema` base makes Hydra validate this file against the
+# dataclasses in models/training/config.py, so an unknown key or a wrongly typed
+# value fails at startup rather than being silently ignored.
+defaults:
+  - train_config_schema
+  - _self_
+
+task: classification
+experiment_name: tiny-imagenet-classification
+run_name: null
+continue_training: false
+continue_folder: null
+
+model:
+  # ViT-Small pretrained on ImageNet-21k then fine-tuned on ImageNet-1k.
+  # Tiny-ImageNet's 200 classes are an ImageNet-1k subset, so this backbone has
+  # already seen every target category — the reason a short fine-tune reaches
+  # high accuracy. 22M parameters keeps a full run to roughly 20 minutes on a
+  # single RTX 5000 Ada.
+  name: vit_small_patch16_224.augreg_in21k_ft_in1k
+  pretrained: true
+  num_classes: 200
+  drop_path_rate: 0.1
+  channels_last: false   # benefits convolutional backbones; a no-op for ViT
+  compile_model: false   # enable for throughput once a config is settled
+
+training:
+  epochs: 5
+
+  # Layer-wise LR decay: the randomly initialised head needs a much larger step
+  # size than the pretrained backbone, which would otherwise be washed out by
+  # early gradients from the untrained head.
+  learning_rate_strategy: llrd
+  head_learning_rate: 1.0e-3
+  encoder_learning_rate: 1.0e-4
+  layer_decay: 0.75
+
+  optimizer_name: adamw
+  optimizer_weight_decay: 0.05
+  optimizer_betas: [0.9, 0.999]
+  optimizer_eps: 1.0e-8
+  fused_optimizer: true
+
+  learning_rate_scheduler: cosine
+  warmup_ratio: 0.05
+  step_schedulers_every_batch: true
+
+  # bf16 on Ada: same exponent range as fp32, so no GradScaler and no
+  # loss-scale underflow stalls. Falls back to fp16 on older GPUs.
+  precision: amp_bf16
+
+  max_grad_norm: 1.0
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: false
+
+  start_epoch_at: 0
+  eval_interval: 1ep
+  save_interval: 1
+  train_subset_num_batches: 0
+  eval_subset_num_batches: 0
+
+  seed: 42
+  deterministic_cuda: false
+
+dataloader:
+  batch_size_train: 128
+  batch_size_validation: 256
+  dataloader_num_workers: 8
+  dataloader_num_workers_eval: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+
+  image_size: 224
+  # Far above the ImageNet default of 0.08: at 64x64 native resolution an 8%
+  # area crop often contains none of the labelled object.
+  crop_scale: [0.65, 1.0]
+  use_randaugment: true
+  randaugment_num_ops: 2
+  randaugment_magnitude: 9
+  pca_lighting_std: 0.1
+  random_erasing_prob: 0.25
+  mixup_alpha: 0.2
+  cutmix_alpha: 1.0
+  mix_prob: 0.5
+  label_smoothing: 0.1
+  # ImageNet statistics, matching what the pretrained backbone saw.
+  normalisation: imagenet
+
+tracking:
+  enabled: true
+  # null -> a local SQLite store under paths.results_path, so a fresh clone
+  # tracks runs with no external service. Point at http://<host>:5000 to use a
+  # central MLflow server.
+  tracking_uri: null
+  # Deliberately false: an MLFLOW_TRACKING_URI exported for another project
+  # would otherwise silently capture these runs.
+  inherit_env_uri: false
+
+paths:
+  data_dir: data
+  results_path: models/artifacts/runs
+  artifacts_dir: models/artifacts
+
+hydra:
+  run:
+    dir: ${paths.results_path}/hydra/${now:%Y-%m-%d_%H-%M-%S}
+  job:
+    chdir: false

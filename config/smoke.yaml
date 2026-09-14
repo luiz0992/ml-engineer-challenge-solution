@@ -1,0 +1,34 @@
+# Fast smoke configuration: exercises the entire pipeline end to end in well
+# under a minute so CI and local changes can be validated without a full run.
+#
+#   uv run python -m models.training.train --config-name smoke
+#
+# Deliberately keeps every structural element of the real run (mixed precision,
+# LLRD, gradient clipping, scheduling, checkpointing, evaluation) and shrinks
+# only the work done, so a break in any of them surfaces here first.
+defaults:
+  - train_classifier
+  - _self_
+
+experiment_name: tiny-imagenet-smoke
+
+model:
+  # A 5M-parameter convolutional backbone; also exercises the channels_last and
+  # ResNet-style LLRD layer-ID paths that the ViT config does not.
+  name: resnet18
+  drop_path_rate: 0.0
+  channels_last: true
+
+training:
+  epochs: 1
+  train_subset_num_batches: 8
+  eval_subset_num_batches: 4
+  warmup_ratio: 0.1
+  save_interval: 1
+
+dataloader:
+  batch_size_train: 32
+  batch_size_validation: 32
+  dataloader_num_workers: 4
+  # 64x64 native resolution: no upsampling, so the smoke run stays fast.
+  image_size: 64
