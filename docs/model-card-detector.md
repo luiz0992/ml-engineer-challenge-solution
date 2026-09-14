@@ -131,10 +131,31 @@ clipped to its bounds, so a client can overlay them directly.
 
 ## Limitations
 
-**Evaluated on COCO only.** mAP of 0.500 is measured on COCO
-val2017, which is the distribution the model was trained for. Accuracy on any
-other distribution — different cameras, domains, or image quality — remains
-unknown.
+**Evaluated on COCO only.** mAP of 0.500 is measured on COCO val2017, the
+distribution the model was trained for. Accuracy elsewhere is unmeasured,
+because mAP needs annotations no other dataset here provides.
+
+Its *failure mode* off-distribution has, however, been characterised. Probed on
+Tiny-ImageNet (64x64 upscaled — same object categories, entirely unlike COCO
+imagery):
+
+| | COCO | Tiny-ImageNet |
+| --- | ---: | ---: |
+| Mean peak confidence | 0.899 | 0.430 |
+| Mean detections at 0.5 | 5.44 | 0.33 |
+| Images with no detection | 1/150 | 106/150 |
+
+Confidence falls 52% and detections
+94%; 106 of
+150 images return nothing at all.
+
+**The model abstains rather than hallucinating, which is the recoverable
+failure mode.** A caller receiving empty results can detect the condition and
+escalate; a model returning confident wrong boxes gives nothing downstream any
+way to tell. This does not make it safe to use off-distribution — it means
+that when it is misused, the misuse is visible.
+
+Reproduce with `scripts/evaluate_detector.py --probe-off-distribution`.
 
 **Fixed 640×640 input.** The model has learned positional priors at this
 resolution; it is not a tunable parameter. Images far from square are squashed,

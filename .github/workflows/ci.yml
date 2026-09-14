@@ -337,6 +337,24 @@ jobs:
             exit 1
           fi
 
+      - name: Validate Kubernetes and monitoring configuration
+        # Written configuration that is never validated drifts. These run
+        # against the real schemas and parsers, not a YAML linter: a manifest
+        # can be valid YAML and still be rejected by the API server.
+        run: |
+          set -euo pipefail
+
+          docker run -v "$PWD/deploy:/deploy:ro" --rm ghcr.io/yannh/kubeconform:latest \
+            -strict -summary -kubernetes-version 1.30.0 /deploy/kubernetes/
+
+          docker run -v "$PWD/monitoring/prometheus:/etc/prometheus:ro" --rm \
+            --entrypoint promtool prom/prometheus:v3.1.0 \
+            check config /etc/prometheus/prometheus.yml
+
+          docker run -v "$PWD/monitoring/alertmanager:/etc/alertmanager:ro" --rm \
+            --entrypoint amtool prom/alertmanager:v0.28.0 \
+            check-config /etc/alertmanager/alertmanager.yml
+
       - name: Validate Compose configuration
         run: |
           set -euo pipefail

@@ -15,5 +15,39 @@
     "AR_small": 0.5005,
     "AR_medium": 0.7018,
     "AR_large": 0.8197
+  },
+  "off_distribution_probe": {
+    "in_distribution": {
+      "population": "COCO val2017 (in distribution)",
+      "num_images": 150,
+      "mean_peak_confidence": 0.8994,
+      "median_peak_confidence": 0.9385,
+      "mean_detections_at_0.5": 5.44,
+      "images_with_no_detection": 1,
+      "top_labels": {
+        "person": 315,
+        "chair": 35,
+        "diningtable": 26,
+        "cup": 25,
+        "car": 22
+      }
+    },
+    "off_distribution": {
+      "population": "Tiny-ImageNet 64x64 upscaled (off distribution)",
+      "num_images": 150,
+      "mean_peak_confidence": 0.4303,
+      "median_peak_confidence": 0.3983,
+      "mean_detections_at_0.5": 0.327,
+      "images_with_no_detection": 106,
+      "top_labels": {
+        "person": 9,
+        "keyboard": 7,
+        "cake": 5,
+        "broccoli": 4,
+        "oven": 3
+      }
+    },
+    "confidence_change_pct": -52.2,
+    "detection_change_pct": -94.0
   }
 }

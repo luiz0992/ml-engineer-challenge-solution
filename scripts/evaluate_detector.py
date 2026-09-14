@@ -66,7 +66,98 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--score-threshold", type=float, default=DEFAULT_SCORE_THRESHOLD)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--output", type=Path, default=Path("benchmarks/detection_eval.json"))
+    parser.add_argument(
+        "--probe-off-distribution",
+        action="store_true",
+        help=(
+            "Also probe behaviour on Tiny-ImageNet (64x64 upscaled), a "
+            "distribution the detector never saw, to characterise how it fails"
+        ),
+    )
     return parser
+
+
+def probe_off_distribution(
+    artifacts_dir: Path, data_dir: Path, sample: int = 150
+) -> dict[str, Any]:
+    """Characterise the detector's behaviour outside its training distribution.
+
+    mAP cannot be computed here -- there are no detection annotations for
+    Tiny-ImageNet -- so this measures the two things that *can* be observed
+    without labels, and which determine how a model fails in production:
+
+    * **Peak confidence.** Does the model know it is out of its depth?
+    * **Detections above threshold.** Does it hallucinate objects, or abstain?
+
+    The distinction matters more than an accuracy number. A model that returns
+    nothing on unfamiliar input is recoverable: a caller sees empty results and
+    can escalate. A model that returns confident wrong detections is not,
+    because nothing downstream can tell the difference.
+    """
+    from collections import Counter
+
+    from api.services.runtime import create_session
+    from api.utils.image_processing import preprocess_for_detection
+
+    metadata = json.loads((artifacts_dir / "detection_labels.json").read_text())
+    id2label = {int(k): v for k, v in metadata["id2label"].items()}
+    names = [id2label.get(i, str(i)) for i in range(metadata["num_classes"])]
+
+    session, input_name = create_session(
+        str(artifacts_dir / "onnx" / "detector_fp32.onnx"),
+        providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+
+    def measure(files: list[Path], label: str) -> dict[str, Any]:
+        peaks: list[float] = []
+        counts: list[int] = []
+        seen: Counter[str] = Counter()
+        for path in files:
+            array, _, _ = preprocess_for_detection(path.read_bytes())
+            scores, _ = session.run(None, {input_name: array[None, ...]})
+            best = scores[0].max(axis=-1)
+            peaks.append(float(best.max()))
+            above = best >= 0.5
+            counts.append(int(above.sum()))
+            for query in np.where(above)[0]:
+                seen[names[int(scores[0][query].argmax())]] += 1
+
+        return {
+            "population": label,
+            "num_images": len(files),
+            "mean_peak_confidence": round(float(np.mean(peaks)), 4),
+            "median_peak_confidence": round(float(np.median(peaks)), 4),
+            "mean_detections_at_0.5": round(float(np.mean(counts)), 3),
+            "images_with_no_detection": sum(1 for c in counts if c == 0),
+            "top_labels": dict(seen.most_common(5)),
+        }
+
+    coco_images = sorted((data_dir / "coco_val2017" / "val2017").glob("*.jpg"))[:sample]
+    tiny_all = sorted((data_dir / "tiny-imagenet-200" / "val").glob("*/*.JPEG"))
+    rng = np.random.default_rng(0)
+    tiny_images = [
+        tiny_all[i] for i in rng.choice(len(tiny_all), min(sample, len(tiny_all)), replace=False)
+    ]
+
+    in_dist = measure(coco_images, "COCO val2017 (in distribution)")
+    off_dist = measure(tiny_images, "Tiny-ImageNet 64x64 upscaled (off distribution)")
+
+    return {
+        "in_distribution": in_dist,
+        "off_distribution": off_dist,
+        "confidence_change_pct": round(
+            100
+            * (off_dist["mean_peak_confidence"] - in_dist["mean_peak_confidence"])
+            / in_dist["mean_peak_confidence"],
+            1,
+        ),
+        "detection_change_pct": round(
+            100
+            * (off_dist["mean_detections_at_0.5"] - in_dist["mean_detections_at_0.5"])
+            / in_dist["mean_detections_at_0.5"],
+            1,
+        ),
+    }
 
 
 def locate_coco(data_dir: Path, annotations: Path | None) -> tuple[Path, Path]:
@@ -258,6 +349,9 @@ def main(argv: list[str] | None = None) -> int:
         },
     }
 
+    if args.probe_off_distribution:
+        report["off_distribution_probe"] = probe_off_distribution(args.artifacts_dir, args.data_dir)
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2))
 
@@ -268,6 +362,24 @@ def main(argv: list[str] | None = None) -> int:
         "\n  Small-object AP is the known weakness of this model family, and the "
         "\n  R18 backbone is weaker here than deeper variants."
     )
+    probe = report.get("off_distribution_probe")
+    if probe:
+        print(f"\n{'=' * 70}\nOFF-DISTRIBUTION BEHAVIOUR\n{'=' * 70}")
+        for key in ("in_distribution", "off_distribution"):
+            entry = probe[key]
+            print(
+                f"  {entry['population']:<48} "
+                f"peak {entry['mean_peak_confidence']:.3f}  "
+                f"dets {entry['mean_detections_at_0.5']:.2f}  "
+                f"empty {entry['images_with_no_detection']}/{entry['num_images']}"
+            )
+        print(
+            f"\n  confidence {probe['confidence_change_pct']:+.0f}%, "
+            f"detections {probe['detection_change_pct']:+.0f}%"
+            "\n  The model abstains rather than hallucinating, which is the "
+            "recoverable failure mode."
+        )
+
     logger.info("Wrote %s", args.output)
     return 0
 

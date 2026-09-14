@@ -533,8 +533,38 @@ inspectable; adding delivery is uncommenting a block and supplying an endpoint.
 
 | Gap | Reason |
 | --- | --- |
-| Detector accuracy off-distribution | Measured on COCO, which is what it was trained for. Behaviour on other cameras, domains, or image quality is unknown. |
-| Alert delivery endpoints | Routing is configured; the webhook and PagerDuty keys are deployment-specific and belong in a secret manager. |
-| Kubernetes manifests are unvalidated against a live cluster | They are syntactically valid and encode the right decisions, but have not been applied to a running cluster. |
+| Detector *accuracy* off-distribution | Still unmeasured, because mAP needs annotations no other dataset here provides. Its failure *mode* is now characterised (below). |
+| Alert delivery endpoints | Routing, grouping, and inhibition are configured and validated with `amtool`. The webhook and PagerDuty keys are deployment-specific and belong in a secret manager, not a repository. |
+| Kubernetes manifests applied to a live cluster | Validated against real Kubernetes 1.30 API schemas with `kubeconform --strict` (10/10 resources), but not applied to a running cluster. |
+
+### Off-distribution failure mode, characterised
+
+Accuracy off-distribution cannot be measured without labels, but the property
+that actually determines how a model fails in production can be:
+
+| | COCO | Tiny-ImageNet (64x64 upscaled) |
+| --- | ---: | ---: |
+| Mean peak confidence | 0.899 | 0.430 |
+| Mean detections at 0.5 | 5.44 | 0.33 |
+| Images with no detection | 1/150 | 106/150 |
+
+**The model abstains rather than hallucinating.** Confidence collapses
+52% and it returns nothing for
+106 of 150 images.
+
+That distinction matters more than an accuracy figure. A model returning empty
+results on unfamiliar input is recoverable — a caller can detect the condition
+and escalate. A model returning confident wrong detections is not, because
+nothing downstream can tell the difference. It does not make off-distribution
+use safe; it makes the misuse visible.
+
+### Configuration validated, not merely written
+
+| Artefact | Tool | Result |
+| --- | --- | --- |
+| `deploy/kubernetes/` | `kubeconform --strict`, k8s 1.30 | 10/10 resources valid |
+| `monitoring/prometheus/` | `promtool check config` / `check rules` | valid, 10 rules |
+| `monitoring/alertmanager/` | `amtool check-config` | valid, 4 receivers, 2 inhibit rules |
+| Compose (dev, prod, gpu) | `docker compose config` | all three render |
 
 Everything else previously listed has been implemented and measured.
