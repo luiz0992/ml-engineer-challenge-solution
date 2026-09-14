@@ -74,6 +74,36 @@ secrets** — `JWT_SECRET_KEY`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, and
 `GRAFANA_PASSWORD` must be supplied or Compose refuses to start, so a
 production deploy cannot silently fall back to a development credential.
 
+### Inference audit trail
+
+Every inference is recorded to Postgres: caller, model name, version, backend,
+latency, cache status, a SHA-256 of the input, and the top prediction. This
+answers questions metrics cannot, because Prometheus aggregates and discards
+individual events — which model version produced a disputed prediction, what
+the input distribution looked like last Tuesday, which user caused a latency
+spike.
+
+Two properties govern the design. **A database problem never fails a request**:
+the inference succeeded, so the user gets their answer whether or not we
+recorded it. **Recording adds no latency**: writes are queued and flushed by a
+background task in batches, because a synchronous insert would add a network
+round trip to a request whose entire budget is a few milliseconds. The queue is
+bounded, so a database outage degrades the audit trail rather than growing
+memory until the process is OOM-killed.
+
+No image bytes are stored, only a digest. Images belong in an object store with
+its own retention and access-control policy, not in an operational database.
+
+Schema changes go through Alembic. Migrations run as a one-shot `migrate`
+service that must complete before the API starts, rather than from the API
+entrypoint — with several replicas, an entrypoint migration means N processes
+racing to apply the same DDL.
+
+```bash
+docker compose run --rm migrate alembic upgrade head   # apply
+docker compose run --rm migrate alembic downgrade -1   # roll back one
+```
+
 ### Image design
 
 One Dockerfile, two targets (`api` and `worker`) sharing a `runtime` stage, so

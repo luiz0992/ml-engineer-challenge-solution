@@ -61,6 +61,27 @@ services:
     networks: [frontend, backend]
     logging: *default-logging
 
+  # --- Schema migrations ---------------------------------------------------
+  # Runs to completion before the API starts. Migrations belong in their own
+  # one-shot service rather than in the API's entrypoint: with several API
+  # replicas, an entrypoint migration means N processes racing to apply the
+  # same DDL.
+  migrate:
+    image: mlchal-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    container_name: mlchal-migrate
+    environment: *api-env
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks: [backend]
+    logging: *default-logging
+
   # --- Application --------------------------------------------------------
   ml-api:
     # Explicit tag so the built image is addressable, and so `up --no-build`
@@ -77,8 +98,8 @@ services:
       # and a compromised container should not be able to swap the model.
       - ./models/artifacts:/app/models/artifacts:ro
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     # Not published to the host: traffic arrives through the gateway. Exposing
@@ -109,9 +130,9 @@ services:
     volumes:
       - ./models/artifacts:/app/models/artifacts:ro
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
-        condition: service_healthy
-      postgres:
         condition: service_healthy
     deploy:
       resources:

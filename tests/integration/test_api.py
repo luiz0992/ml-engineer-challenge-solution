@@ -456,3 +456,73 @@ class TestOpenAPI:
 
         for status in ("401", "413", "422", "429", "503"):
             assert status in responses
+
+
+class TestMetricLabels:
+    """Metric cardinality and correctness.
+
+    Metrics that exist but are mislabelled are worse than none: they look
+    healthy and make every dashboard wrong.
+    """
+
+    async def test_requests_are_labelled_by_route_template(
+        self, client: Any, auth_headers: dict[str, str]
+    ) -> None:
+        """Labels must be the route template, not 'unmatched'.
+
+        Starlette populates ``scope["route"]`` during routing, so reading it
+        before ``call_next`` returns "unmatched" for every request and
+        collapses the whole metric into one series.
+        """
+        await client.get("/api/v1/health")
+        await client.get("/api/v1/models")
+
+        body = (await client.get("/api/v1/metrics")).text
+        counters = [line for line in body.splitlines() if line.startswith("http_requests_total{")]
+
+        assert counters, "no request counters were recorded"
+
+        # Matched routes must carry their template. "unmatched" is correct for
+        # a 404, which genuinely has no route, so the assertion targets the
+        # routes we actually called rather than banning the label outright.
+        assert any('endpoint="/health"' in line for line in counters), (
+            "GET /api/v1/health is not labelled with its route template; the "
+            "template is being resolved before routing has happened. "
+            f"Observed: {counters}"
+        )
+        assert any('endpoint="/models"' in line for line in counters)
+
+    async def test_path_parameters_do_not_inflate_cardinality(
+        self, client: Any, auth_headers: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A million job lookups must share one time series.
+
+        Labelling by raw path would create a series per job ID and eventually
+        exhaust Prometheus's memory.
+        """
+
+        class _Unknown:
+            state = "PENDING"
+            info: dict[str, Any] = {}
+
+            class backend:  # noqa: N801
+                @staticmethod
+                def get_task_meta(_: str) -> dict[str, Any]:
+                    return {}
+
+        monkeypatch.setattr("api.routers.batch.AsyncResult", lambda _: _Unknown())
+
+        for job_id in ("job-a", "job-b", "job-c"):
+            await client.get(f"/api/v1/batch/{job_id}", headers=auth_headers)
+
+        body = (await client.get("/api/v1/metrics")).text
+        batch_counters = [
+            line
+            for line in body.splitlines()
+            if line.startswith("http_requests_total{") and "/batch/" in line
+        ]
+
+        for job_id in ("job-a", "job-b", "job-c"):
+            assert not any(job_id in line for line in batch_counters), (
+                f"{job_id} appears in a metric label; path parameters are not being templated"
+            )

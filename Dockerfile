@@ -77,6 +77,11 @@ WORKDIR /app
 # rebuild.
 COPY --chown=app:app api/ ./api/
 COPY --chown=app:app worker/ ./worker/
+# Schema migrations. Applied by the one-shot `migrate` service in Compose,
+# never by the API's entrypoint: with several replicas that would mean N
+# processes racing to apply the same DDL.
+COPY --chown=app:app alembic.ini ./
+COPY --chown=app:app migrations/ ./migrations/
 
 # Mount point for the artifacts volume. Created here so it exists with the
 # right ownership even when no volume is attached.

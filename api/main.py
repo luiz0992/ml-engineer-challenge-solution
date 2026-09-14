@@ -23,9 +23,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from api.config import AppEnv, Settings, UserTier, get_settings
+from api.db.session import (
+    check_connection,
+    create_all,
+    create_engine,
+    create_session_factory,
+)
 from api.exceptions import APIError, RateLimitExceededError
 from api.logging_config import configure_logging, get_correlation_id, get_logger
 from api.middleware.auth import APIKeyStore
@@ -36,7 +43,9 @@ from api.middleware.monitoring import (
 )
 from api.middleware.rate_limit import RateLimiter
 from api.routers import auth, batch, classification, detection, health
+from api.services.audit_service import AuditService
 from api.services.cache_service import CacheService
+from api.services.detection_service import DetectionService
 from api.services.inference_service import InferenceService
 from api.services.model_service import ModelService
 from api.utils.validators import configure_pillow_limits
@@ -99,6 +108,39 @@ async def _create_redis(settings: Settings) -> Redis | None:
     return client
 
 
+async def _create_database(
+    settings: Settings,
+) -> tuple[AsyncEngine | None, async_sessionmaker[AsyncSession] | None]:
+    """Connect to Postgres, returning ``(None, None)`` when unavailable.
+
+    Unlike the model, the database is not required to serve traffic: inference
+    works without an audit trail. Failing startup here would take down a
+    service that is otherwise perfectly capable of answering requests, so the
+    failure is logged loudly and the service continues without auditing.
+    """
+    try:
+        engine = create_engine(settings)
+        healthy, detail = await check_connection(engine)
+        if not healthy:
+            raise RuntimeError(detail or "connection check failed")
+
+        # Convenience for local development and tests. Production schema
+        # changes go through Alembic; see migrations/.
+        if not settings.is_production:
+            await create_all(engine)
+
+        logger.info("database_connected", host=settings.postgres_host)
+        return engine, create_session_factory(engine)
+
+    except Exception as exc:
+        logger.warning(
+            "database_unavailable",
+            error=str(exc),
+            impact="inference audit logging is disabled",
+        )
+        return None, None
+
+
 def _seed_api_keys(settings: Settings) -> APIKeyStore:
     """Create the API key store.
 
@@ -141,6 +183,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     cache_service = CacheService(redis, ttl_seconds=settings.cache_ttl_seconds)
     rate_limiter = RateLimiter(redis, settings)
 
+    engine, session_factory = await _create_database(settings)
+    audit_service = AuditService(session_factory)
+    await audit_service.start()
+
     model_service = ModelService(settings)
     started = time.perf_counter()
     # Not guarded: a model that cannot load is a fatal misconfiguration, and
@@ -152,6 +198,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         backend=model.backend.value,
         degraded=model.degraded_from is not None,
     )
+    # The detector is optional: a deployment may serve classification only, and
+    # failing startup over it would take down a working service.
+    detection_service = None
+    try:
+        detector = model_service.load_detector()
+        record_model_loaded(
+            model=detector.name,
+            version=detector.version,
+            backend=detector.backend.value,
+            degraded=detector.degraded_from is not None,
+        )
+        detection_service = DetectionService(model_service, settings)
+    except Exception as exc:
+        logger.warning(
+            "detector_unavailable",
+            error=str(exc),
+            impact="POST /api/v1/detect will return 503",
+        )
+
     logger.info("models_ready", duration_ms=round((time.perf_counter() - started) * 1000, 1))
 
     app.state.settings = settings
@@ -159,12 +224,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.cache_service = cache_service
     app.state.rate_limiter = rate_limiter
     app.state.model_service = model_service
-    app.state.inference_service = InferenceService(model_service, cache_service, settings)
+    app.state.db_engine = engine
+    app.state.audit_service = audit_service
+    app.state.inference_service = InferenceService(
+        model_service, cache_service, settings, audit_service
+    )
+    app.state.detection_service = detection_service
     app.state.api_key_store = _seed_api_keys(settings)
 
     try:
         yield
     finally:
+        # Drain the audit queue before closing the engine, so records buffered
+        # at the moment of a rolling deploy are persisted rather than lost --
+        # audit gaps would otherwise cluster exactly around deploys.
+        await audit_service.stop()
+        if engine is not None:
+            await engine.dispose()
         if redis is not None:
             await redis.aclose()
         logger.info("shutdown_complete")

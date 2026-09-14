@@ -52,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifacts-dir", type=Path, default=Path("models/artifacts"))
     parser.add_argument("--skip-int8", action="store_true", help="Do not produce the INT8 variant")
     parser.add_argument(
+        "--with-detection",
+        action="store_true",
+        help="Also export the RT-DETR object detector (downloads ~80 MB)",
+    )
+    parser.add_argument(
         "--calibration-samples",
         type=int,
         default=256,
@@ -114,6 +119,42 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("%s already exists (use --force to re-export)", int8_path)
     else:
         _export_int8(fp32_path, int8_path, labels["image_size"], args.calibration_samples)
+
+    # --- Detection --------------------------------------------------------
+    detector_path = onnx_dir / "detector_fp32.onnx"
+    if args.with_detection and (not detector_path.exists() or args.force):
+        from models.optimisation.export_detection import (
+            export_detection_onnx,
+            write_detection_metadata,
+        )
+
+        metadata = export_detection_onnx(detector_path)
+        write_detection_metadata(artifacts_dir, metadata)
+        logger.info(
+            "Exported detector: %d classes, max |torch - onnx| = %.3e",
+            metadata["num_classes"],
+            metadata["max_abs_diff"],
+        )
+    elif detector_path.exists():
+        logger.info("%s already exists", detector_path)
+
+    # --- Detection --------------------------------------------------------
+    detector_path = onnx_dir / "detector_fp32.onnx"
+    if args.with_detection and (not detector_path.exists() or args.force):
+        from models.optimisation.export_detection import (
+            export_detection_onnx,
+            write_detection_metadata,
+        )
+
+        metadata = export_detection_onnx(detector_path)
+        write_detection_metadata(artifacts_dir, metadata)
+        logger.info(
+            "Exported detector: %d classes, max |torch - onnx| = %.3e",
+            metadata["num_classes"],
+            metadata["max_abs_diff"],
+        )
+    elif detector_path.exists():
+        logger.info("%s already exists", detector_path)
 
     logger.info("Artifacts ready in %s", artifacts_dir)
     for path in sorted(artifacts_dir.rglob("*")):

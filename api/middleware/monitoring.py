@@ -125,10 +125,13 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         if request.url.path in self.exclude_paths:
             return await call_next(request)
 
-        endpoint = _route_template(request)
         method = request.method
+        # The in-flight gauge is labelled by path, because the route template
+        # is not known until routing has happened and the gauge must be
+        # incremented before the request is handled.
+        in_progress_label = request.url.path
 
-        REQUESTS_IN_PROGRESS.labels(method=method, endpoint=endpoint).inc()
+        REQUESTS_IN_PROGRESS.labels(method=method, endpoint=in_progress_label).inc()
         started = time.perf_counter()
         status_code = 500
 
@@ -138,7 +141,15 @@ class MetricsMiddleware(BaseHTTPMiddleware):
             return response
         finally:
             duration = time.perf_counter() - started
-            REQUESTS_IN_PROGRESS.labels(method=method, endpoint=endpoint).dec()
+            REQUESTS_IN_PROGRESS.labels(method=method, endpoint=in_progress_label).dec()
+
+            # Resolved *after* call_next. Starlette populates scope["route"]
+            # during routing, so reading it beforehand returns "unmatched" for
+            # every request and collapses the whole metric into a single
+            # series -- which still produces plausible-looking output, and
+            # makes every per-endpoint dashboard and alert useless.
+            endpoint = _route_template(request)
+
             REQUEST_LATENCY.labels(method=method, endpoint=endpoint).observe(duration)
             REQUEST_COUNT.labels(
                 method=method, endpoint=endpoint, status_code=str(status_code)

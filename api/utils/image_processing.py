@@ -176,3 +176,76 @@ def top_k(probabilities: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
         np.take_along_axis(selected, order, axis=-1),
         np.take_along_axis(indices, order, axis=-1),
     )
+
+
+# ---------------------------------------------------------------------------
+# Object detection preprocessing
+# ---------------------------------------------------------------------------
+#: RT-DETR is trained at a fixed 640x640 and has learned positional priors at
+#: that resolution, so this is not a tunable parameter.
+DETECTION_IMAGE_SIZE = 640
+
+
+def preprocess_for_detection(
+    data: bytes, size: int = DETECTION_IMAGE_SIZE
+) -> tuple[np.ndarray, int, int]:
+    """Preprocess an image for RT-DETR.
+
+    Returns ``(array, original_width, original_height)``. The original
+    dimensions are needed to map normalised box coordinates back to the pixel
+    space of the image the caller uploaded.
+
+    RT-DETR's preprocessing differs from the classifier's in two ways that are
+    easy to get wrong and silent when wrong:
+
+    1. **No mean/std normalisation.** Its image processor has
+       ``do_normalize=False``; inputs are only rescaled to ``[0, 1]``. Applying
+       ImageNet statistics here, by analogy with the classifier, shifts the
+       input distribution and degrades detection with no error.
+    2. **A square resize that does not preserve aspect ratio.** The processor
+       resizes directly to 640x640 with ``do_pad=False``. Letterboxing instead
+       would place objects where the model does not expect them, and the
+       inverse box transform would then be wrong.
+    """
+    image = decode_image(data)
+    original_width, original_height = image.size
+
+    # BILINEAR matches the processor's resample=2.
+    resized = image.resize((size, size), Image.Resampling.BILINEAR)
+
+    array = np.asarray(resized, dtype=np.float32) / 255.0
+    return array.transpose(2, 0, 1), original_width, original_height
+
+
+def boxes_to_absolute(boxes: np.ndarray, original_width: int, original_height: int) -> np.ndarray:
+    """Convert normalised centre-format boxes to absolute corner coordinates.
+
+    RT-DETR emits ``(cx, cy, w, h)`` normalised to ``[0, 1]`` against the
+    resized input. Because the resize squashed the image to a square without
+    preserving aspect ratio, scaling each axis by the corresponding original
+    dimension inverts the transform exactly -- no letterbox offset is involved.
+
+    Returns ``(x_min, y_min, x_max, y_max)`` in pixels of the uploaded image,
+    clipped to its bounds so a box can never be reported outside the picture.
+    """
+    centre_x, centre_y, width, height = (
+        boxes[..., 0],
+        boxes[..., 1],
+        boxes[..., 2],
+        boxes[..., 3],
+    )
+
+    x_min = (centre_x - width / 2) * original_width
+    y_min = (centre_y - height / 2) * original_height
+    x_max = (centre_x + width / 2) * original_width
+    y_max = (centre_y + height / 2) * original_height
+
+    return np.stack(
+        [
+            np.clip(x_min, 0, original_width),
+            np.clip(y_min, 0, original_height),
+            np.clip(x_max, 0, original_width),
+            np.clip(y_max, 0, original_height),
+        ],
+        axis=-1,
+    )

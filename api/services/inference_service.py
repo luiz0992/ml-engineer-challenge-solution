@@ -15,6 +15,7 @@ milliseconds — enough to destroy tail latency under concurrency.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from typing import Any
 
@@ -28,6 +29,7 @@ from api.models.responses import (
     ModelProvenance,
     Prediction,
 )
+from api.services.audit_service import AuditService
 from api.services.cache_service import CacheService
 from api.services.model_service import LoadedModel, ModelService
 from api.utils.image_processing import (
@@ -50,10 +52,14 @@ class InferenceService:
         model_service: ModelService,
         cache_service: CacheService,
         settings: Settings,
+        audit_service: AuditService | None = None,
     ) -> None:
         self.models = model_service
         self.cache = cache_service
         self.settings = settings
+        # Optional: the worker and unit tests run without an audit trail, and
+        # inference must not depend on one existing.
+        self.audit = audit_service or AuditService(None)
 
     # --- Classification ---------------------------------------------------
     async def classify(
@@ -65,11 +71,13 @@ class InferenceService:
         model_version: str | None = None,
         include_probabilities: bool = True,
         use_cache: bool = True,
+        user_id: str | None = None,
+        user_tier: str | None = None,
     ) -> ClassificationResponse:
         """Classify a single image."""
         started = time.perf_counter()
 
-        validate_image_upload(
+        metadata = validate_image_upload(
             image_bytes,
             max_bytes=self.settings.max_upload_bytes,
             max_pixels=self.settings.max_image_pixels,
@@ -80,6 +88,7 @@ class InferenceService:
             "top_k": top_k_results,
             "include_probabilities": include_probabilities,
         }
+        image_sha256 = hashlib.sha256(image_bytes).hexdigest()
 
         cache_key = CacheService.build_key(
             image_bytes,
@@ -90,22 +99,56 @@ class InferenceService:
         )
 
         if use_cache and (cached := await self.cache.get(cache_key)) is not None:
+            predictions = [Prediction(**p) for p in cached["predictions"]]
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+            self._audit(
+                correlation_id,
+                model,
+                predictions,
+                elapsed_ms,
+                metadata,
+                cached=True,
+                user_id=user_id,
+                user_tier=user_tier,
+                image_sha256=image_sha256,
+            )
             return ClassificationResponse(
-                predictions=[Prediction(**p) for p in cached["predictions"]],
-                inference_time_ms=round((time.perf_counter() - started) * 1000, 2),
+                predictions=predictions,
+                inference_time_ms=elapsed_ms,
                 correlation_id=correlation_id,
                 provenance=_provenance(model),
                 cached=True,
             )
 
-        logits = await self._run_batch(model, [image_bytes])
+        try:
+            logits = await self._run_batch(model, [image_bytes])
+        except Exception as exc:
+            # Failures are audited too: an error rate computed only from
+            # successful rows is meaningless, and failures are usually what an
+            # investigation is about.
+            self._audit(
+                correlation_id,
+                model,
+                [],
+                round((time.perf_counter() - started) * 1000, 2),
+                metadata,
+                cached=False,
+                user_id=user_id,
+                user_tier=user_tier,
+                image_sha256=image_sha256,
+                status="failure",
+                error_code=getattr(exc, "code", type(exc).__name__),
+            )
+            raise
+
         predictions = self._decode_classification(
             logits[0], model, top_k_results, include_probabilities
         )
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
 
         response = ClassificationResponse(
             predictions=predictions,
-            inference_time_ms=round((time.perf_counter() - started) * 1000, 2),
+            inference_time_ms=elapsed_ms,
             correlation_id=correlation_id,
             provenance=_provenance(model),
             cached=False,
@@ -117,7 +160,65 @@ class InferenceService:
                 {"predictions": [p.model_dump() for p in predictions]},
             )
 
+        self._audit(
+            correlation_id,
+            model,
+            predictions,
+            elapsed_ms,
+            metadata,
+            cached=False,
+            user_id=user_id,
+            user_tier=user_tier,
+            image_sha256=image_sha256,
+        )
         return response
+
+    def _audit(
+        self,
+        correlation_id: str,
+        model: LoadedModel,
+        predictions: list[Prediction],
+        latency_ms: float,
+        metadata: Any,
+        *,
+        cached: bool,
+        user_id: str | None,
+        user_tier: str | None,
+        image_sha256: str | None = None,
+        status: str = "success",
+        error_code: str | None = None,
+        batch_size: int = 1,
+    ) -> None:
+        """Queue an audit record. Never raises and never blocks.
+
+        ``image_sha256`` is a digest of the upload itself, not of its
+        dimensions: a fingerprint derived from metadata would collide for every
+        image of the same size and be useless for identifying repeat
+        submissions or linking a dispute to a specific input.
+        """
+        top = predictions[0] if predictions else None
+        self.audit.record(
+            correlation_id=correlation_id,
+            user_id=user_id,
+            user_tier=user_tier,
+            model_name=model.name,
+            model_version=model.version,
+            backend=model.backend.value,
+            task=model.task.value,
+            status=status,
+            error_code=error_code,
+            latency_ms=latency_ms,
+            cached=cached,
+            batch_size=batch_size,
+            image_sha256=image_sha256,
+            image_bytes=getattr(metadata, "size_bytes", None),
+            image_width=getattr(metadata, "width", None),
+            image_height=getattr(metadata, "height", None),
+            image_format=getattr(metadata, "format", None),
+            top_label=top.label if top else None,
+            top_class_id=top.class_id if top else None,
+            top_probability=top.probability if top else None,
+        )
 
     async def classify_many(
         self,

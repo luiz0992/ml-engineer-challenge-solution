@@ -69,6 +69,8 @@ async def classify_image(
             model_version=model_version,
             include_probabilities=include_probabilities,
             use_cache=use_cache,
+            user_id=principal.user_id,
+            user_tier=principal.tier.value,
         )
     except Exception:
         model = inference.models.get_classifier(model_version)

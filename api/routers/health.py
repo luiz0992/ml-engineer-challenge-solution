@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from api.config import Settings, get_settings
@@ -29,6 +29,7 @@ API_VERSION = "1.0.0"
 
 @router.get("/health", response_model=HealthResponse, summary="Service health")
 async def health(
+    request: Request = None,  # type: ignore[assignment]
     models: ModelService = Depends(get_model_service),
     cache: CacheService = Depends(get_cache_service),
 ) -> HealthResponse:
@@ -65,6 +66,23 @@ async def health(
         )
     )
 
+    database_healthy = True
+    engine = getattr(getattr(request, "app", None), "state", None)
+    engine = getattr(engine, "db_engine", None) if engine is not None else None
+    if engine is not None:
+        from api.db.session import check_connection
+
+        started = time.perf_counter()
+        database_healthy, database_detail = await check_connection(engine)
+        components.append(
+            ComponentHealth(
+                name="database",
+                healthy=database_healthy,
+                detail=database_detail or "connected",
+                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
+        )
+
     degraded = [m for m in loaded if m.degraded_from is not None]
     if degraded:
         components.append(
@@ -84,7 +102,7 @@ async def health(
 
     if not loaded:
         status = "unhealthy"
-    elif not cache_healthy or degraded:
+    elif not cache_healthy or degraded or not database_healthy:
         status = "degraded"
     else:
         status = "healthy"

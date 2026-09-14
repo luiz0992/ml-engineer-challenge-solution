@@ -266,7 +266,13 @@ class ModelService:
         return session, session.get_inputs()[0].name
 
     @staticmethod
-    def _warmup(session: Any, input_name: str, image_size: int, backend: InferenceBackend) -> None:
+    def _warmup(
+        session: Any,
+        input_name: str,
+        image_size: int,
+        backend: InferenceBackend,
+        output_ndim: int = 2,
+    ) -> None:
         """Run one throwaway inference to prove the backend works.
 
         This is not an optimisation, it is a correctness check. A successfully
@@ -288,7 +294,7 @@ class ModelService:
         started = time.perf_counter()
         outputs = session.run(None, {input_name: probe})
 
-        if not outputs or outputs[0].ndim != 2:
+        if not outputs or outputs[0].ndim != output_ndim:
             raise RuntimeError(
                 f"Warmup produced an unexpected output shape for {backend.value}: "
                 f"{[o.shape for o in outputs]}"
@@ -334,6 +340,88 @@ class ModelService:
     def get_classifier(self, version: str | None = None) -> LoadedModel:
         return self.get("tiny-imagenet-classifier", version)
 
+    def get_detector(self, version: str | None = None) -> LoadedModel:
+        return self.get("rtdetr-coco-detector", version)
+
+    def load_detector(
+        self,
+        *,
+        name: str = "rtdetr-coco-detector",
+        version: str = "v1",
+        make_active: bool = True,
+    ) -> LoadedModel:
+        """Load the object detector.
+
+        Unlike the classifier, a missing detector is not fatal. The service is
+        useful without it, so the caller decides whether to treat failure as an
+        error; ``/api/v1/detect`` reports 503 with an explanation when the model
+        is absent.
+        """
+        artifacts = self.settings.artifacts_dir
+        artifact = artifacts / "onnx" / "detector_fp32.onnx"
+        labels_path = artifacts / "detection_labels.json"
+
+        if not artifact.exists() or not labels_path.exists():
+            raise ModelUnavailableError(
+                "Detection artefacts not found. Export them with "
+                "`python scripts/prepare_artifacts.py --with-detection`.",
+                details={"expected": [str(artifact), str(labels_path)]},
+            )
+
+        metadata = json.loads(labels_path.read_text())
+        id2label = {int(k): v for k, v in metadata["id2label"].items()}
+        class_names = [id2label.get(i, str(i)) for i in range(metadata["num_classes"])]
+
+        # Detection runs on the same ONNX backends as the classifier; the
+        # fallback chain is shared.
+        preferred = self.settings.inference_backend
+        chain = (
+            _FALLBACK_CHAINS.get(preferred, (preferred,))
+            if self.settings.enable_graceful_degradation
+            else (preferred,)
+        )
+        # INT8 is not exported for the detector, so it is not a candidate.
+        chain = tuple(c for c in chain if c is not InferenceBackend.ONNX_INT8)
+
+        failures: list[str] = []
+        for candidate in chain:
+            try:
+                session, input_name = self._create_session(artifact, candidate)
+                self._warmup(session, input_name, metadata["image_size"], candidate, output_ndim=3)
+            except Exception as exc:
+                failures.append(f"{candidate.value}: {type(exc).__name__}: {exc}")
+                continue
+
+            model = LoadedModel(
+                name=name,
+                version=version,
+                task=TaskType.DETECTION,
+                backend=candidate,
+                session=session,
+                input_name=input_name,
+                class_names=class_names,
+                wnids=[],
+                image_size=metadata["image_size"],
+                artifact_path=artifact,
+                loaded_at=datetime.now(UTC),
+                metrics={},
+                degraded_from=preferred if candidate is not preferred else None,
+            )
+            self.register(model, make_active=make_active)
+            logger.info(
+                "model_loaded",
+                model=model.key,
+                backend=candidate.value,
+                classes=model.num_classes,
+                task="detection",
+            )
+            return model
+
+        raise ModelUnavailableError(
+            "No inference backend could be initialised for the detector.",
+            details={"attempts": failures},
+        )
+
     def list_models(self) -> list[LoadedModel]:
         with self._lock:
             return list(self._models.values())
@@ -377,3 +465,15 @@ class ModelService:
             duration_ms=round((time.perf_counter() - started) * 1000, 2),
         )
         return outputs[0]
+
+    def run_multi(self, model: LoadedModel, batch: np.ndarray) -> list[np.ndarray]:
+        """Execute a forward pass returning every output.
+
+        Detection produces two tensors (scores and boxes); :meth:`run` returns
+        only the first, which is the right shape for classification.
+        """
+        try:
+            return model.session.run(None, {model.input_name: batch})
+        except Exception as exc:
+            logger.exception("inference_failed", model=model.key, batch=batch.shape[0])
+            raise ModelUnavailableError("The model failed to execute this request.") from exc

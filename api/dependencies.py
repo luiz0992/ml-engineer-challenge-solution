@@ -11,9 +11,10 @@ from __future__ import annotations
 from fastapi import Depends, Request
 
 from api.config import Settings, get_settings
-from api.exceptions import ServiceUnavailableError
+from api.exceptions import ModelUnavailableError, ServiceUnavailableError
 from api.middleware.rate_limit import RateLimiter
 from api.services.cache_service import CacheService
+from api.services.detection_service import DetectionService
 from api.services.inference_service import InferenceService
 from api.services.model_service import ModelService
 
@@ -38,6 +39,21 @@ def get_inference_service(request: Request) -> InferenceService:
     service = getattr(request.app.state, "inference_service", None)
     if service is None:
         raise ServiceUnavailableError("The inference service is not initialised.")
+    return service
+
+
+def get_detection_service(request: Request) -> DetectionService:
+    """Return the detection service, or 503 when no detector is deployed.
+
+    Detection is optional: the service is useful without it, so a missing
+    detector degrades one endpoint rather than failing startup.
+    """
+    service = getattr(request.app.state, "detection_service", None)
+    if service is None:
+        raise ModelUnavailableError(
+            "No detection model is deployed in this environment. Classification "
+            "is available at POST /api/v1/classify."
+        )
     return service
 
 
