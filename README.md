@@ -23,6 +23,77 @@ single authenticated, rate-limited, observable HTTP API.
 
 _TBD — added in Layer 7 alongside the Compose stack._
 
+## Results
+
+### Image classification — Tiny-ImageNet (200 classes)
+
+Fine-tuned `vit_small_patch16_224.augreg_in21k_ft_in1k` for 5 epochs on a
+single RTX 5000 Ada.
+
+| Metric | Value |
+| --- | --- |
+| Top-1 accuracy | **85.88%** |
+| Top-5 accuracy | **96.54%** |
+| Validation loss | 0.5965 |
+| Training time | 7 min 4 s (5 epochs) |
+| Throughput | ~9.7 optimizer steps/s at batch 128 |
+| Peak GPU memory | 5.4 GiB |
+
+Measured over the full 10,000-image validation split. Accuracy improved
+monotonically across all five epochs with no divergence.
+
+| Epoch | Train loss | Val loss | Top-1 | Top-5 |
+| --- | --- | --- | --- | --- |
+| 0 | 3.222 | 0.738 | 82.37% | 95.56% |
+| 1 | 2.437 | 0.664 | 84.17% | 96.18% |
+| 2 | 2.315 | 0.619 | 85.28% | 96.50% |
+| 3 | 2.213 | 0.603 | 85.80% | 96.54% |
+| 4 | 2.109 | 0.596 | **85.88%** | **96.54%** |
+
+Reproduce with:
+
+```bash
+python scripts/setup/download_datasets.py --dataset tiny_imagenet
+uv run python -m models.training.train
+```
+
+### Inference performance
+
+ViT-Small/16 at 224x224, batch 32, RTX 5000 Ada. Full matrix in
+[`benchmarks/README.md`](benchmarks/README.md); analysis and deployment
+recommendation in [`benchmarks/ANALYSIS.md`](benchmarks/ANALYSIS.md).
+
+| Backend | Latency | Throughput | Speedup | Top-1 |
+| --- | ---: | ---: | ---: | ---: |
+| PyTorch eager FP32 | 16.78 ms | 1,907 img/s | 1.00x | 87.25% |
+| PyTorch eager bf16 | 5.23 ms | 6,118 img/s | 3.21x | 87.25% |
+| **TensorRT FP16** | **3.49 ms** | **9,177 img/s** | **4.81x** | 87.25% |
+| ONNX Runtime CPU INT8 | 475 ms | 67 img/s | 0.04x | 81.85% |
+
+Single-image latency is 1.05 ms under TensorRT, three orders of magnitude
+inside the sub-second requirement.
+
+**INT8 is not recommended for this model.** It costs 5.4 points of top-1
+accuracy for a 1.3x CPU speedup. Getting even that required replacing ONNX
+Runtime's default min-max calibration, which cost 17.7 points, with percentile
+calibration — vision transformers produce rare LayerNorm and GELU outliers that
+destroy a min-max quantization range. See the analysis for the full calibration
+study.
+
+**Why training loss stays near 2.1 while validation loss is 0.60.** These are
+not the same quantity. Training loss is measured against MixUp/CutMix-mixed
+soft targets with label smoothing, which carry irreducible entropy — a
+perfectly calibrated model cannot drive it to zero. Validation loss is measured
+against clean, unmixed labels. The gap is expected and is evidence the
+regularisers are active, not of a bug.
+
+**Why the backbone transfers so well.** Tiny-ImageNet's 200 classes are a
+subset of ImageNet-1k, so this backbone has already seen every target category
+during pretraining. This is a genuine advantage of the model choice rather than
+a property of the method, and is stated explicitly here because it makes the
+headline number less impressive than it first appears.
+
+
 ## Quick start
 
 Requires Docker with the NVIDIA container runtime (for GPU inference) and
@@ -34,10 +105,76 @@ uv sync --extra dev           # serving + test dependencies
 uv sync --extra train         # adds torch/CUDA, only needed for training
 ```
 
+## API
+
+Six endpoints under `/api/v1`, plus unprefixed probes for orchestrators.
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| POST | `/api/v1/auth/token` | API key | Exchange an API key for a bearer token |
+| POST | `/api/v1/classify` | Bearer | Classify a single image |
+| POST | `/api/v1/detect` | Bearer | Object detection |
+| POST | `/api/v1/batch` | Bearer | Submit an async batch job (202 + job ID) |
+| GET | `/api/v1/batch/{job_id}` | Bearer | Poll job progress and results |
+| GET | `/api/v1/models` | none | Registered models and metadata |
+| GET | `/api/v1/health` | none | Aggregate health with per-component detail |
+| GET | `/api/v1/metrics` | none | Prometheus metrics |
+| GET | `/health/live`, `/health/ready` | none | Liveness and readiness probes |
+
+Interactive documentation is generated at `/docs`; the OpenAPI schema is at
+`/openapi.json`.
+
+### Example
+
+```bash
+TOKEN=$(curl -s localhost:8000/api/v1/auth/token \
+  -H 'Content-Type: application/json' \
+  -d '{"api_key":"dev-key-pro"}' | jq -r .access_token)
+
+curl -s localhost:8000/api/v1/classify?top_k=3 \
+  -H "Authorization: Bearer $TOKEN" \
+  -F file=@image.jpeg | jq
+```
+
+```json
+{
+  "predictions": [
+    {"label": "goldfish", "class_id": 0, "wnid": "n01443537", "probability": 0.959}
+  ],
+  "inference_time_ms": 8.8,
+  "correlation_id": "7a3bade2604f4776a0bfa8d136030e61",
+  "provenance": {"model_name": "tiny-imagenet-classifier", "model_version": "v1", "backend": "onnx"},
+  "cached": false
+}
+```
+
+### Rate limits
+
+Enforced per tier with a sliding window in Redis, reported in
+`X-RateLimit-Limit` and `X-RateLimit-Remaining` on every response.
+
+| Tier | Requests / minute |
+| --- | --- |
+| free | 10 |
+| pro | 120 |
+| enterprise | 1200 |
+
+### Errors
+
+Every error returns the same envelope, with a stable `code` to branch on and
+the `correlation_id` to quote when reporting a problem.
+
+```json
+{"error": {"code": "unsupported_format", "message": "Format TIFF is not supported.",
+           "details": {"supported_formats": ["BMP", "JPEG", "PNG", "WEBP"]},
+           "correlation_id": "..."}}
+```
+
 ## Project layout
 
 ```
 api/          FastAPI application (routers, services, middleware, schemas)
+worker/       Celery application and batch inference tasks
 ml/           Dataset pipelines, training, optimisation, model validation
 worker/       Celery tasks for batch inference
 tests/        Unit, integration, and performance suites
