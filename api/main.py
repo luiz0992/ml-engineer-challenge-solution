@@ -42,12 +42,13 @@ from api.middleware.monitoring import (
     record_model_loaded,
 )
 from api.middleware.rate_limit import RateLimiter
-from api.routers import auth, batch, classification, detection, health
+from api.routers import auth, batch, classification, detection, health, similarity
 from api.services.audit_service import AuditService
 from api.services.cache_service import CacheService
 from api.services.detection_service import DetectionService
 from api.services.inference_service import InferenceService
 from api.services.model_service import ModelService
+from api.services.similarity_service import SimilarityIndex, SimilarityService
 from api.utils.validators import configure_pillow_limits
 
 logger = get_logger(__name__)
@@ -217,6 +218,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             impact="POST /api/v1/detect will return 503",
         )
 
+    # Similarity search is optional in the same way as detection: a deployment
+    # without an index degrades one endpoint rather than failing startup.
+    similarity_service = None
+    try:
+        embedder = model_service.load_embedder()
+        index = SimilarityIndex.load(settings.artifacts_dir)
+        similarity_service = SimilarityService(model_service, index, settings, embedder.class_names)
+        record_model_loaded(
+            model=embedder.name,
+            version=embedder.version,
+            backend=embedder.backend.value,
+            degraded=embedder.degraded_from is not None,
+        )
+    except Exception as exc:
+        logger.warning(
+            "similarity_unavailable",
+            error=str(exc),
+            impact="POST /api/v1/similar will return 503",
+        )
+
     logger.info("models_ready", duration_ms=round((time.perf_counter() - started) * 1000, 1))
 
     app.state.settings = settings
@@ -230,6 +251,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         model_service, cache_service, settings, audit_service
     )
     app.state.detection_service = detection_service
+    app.state.similarity_service = similarity_service
     app.state.api_key_store = _seed_api_keys(settings)
 
     try:
@@ -289,6 +311,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth.router, prefix=prefix)
     app.include_router(classification.router, prefix=prefix)
     app.include_router(detection.router, prefix=prefix)
+    app.include_router(similarity.router, prefix=prefix)
     app.include_router(batch.router, prefix=prefix)
     app.include_router(health.router, prefix=prefix)
     # Unprefixed aliases, so orchestrator probes need not know the API version.

@@ -1,0 +1,286 @@
+"""Image similarity search: embedding export and index construction.
+
+The third model reuses the fine-tuned classifier's backbone as a feature
+extractor rather than introducing a separate network. That is a deliberate
+choice with a real trade-off.
+
+**Why reuse the backbone.** The backbone was fine-tuned on this exact domain, so
+its penultimate features are already discriminative for these 200 categories —
+which is what similarity search needs. It costs nothing extra to serve: the same
+87 MB of weights, one additional 1.5 MB export with the classifier head removed.
+A separate CLIP model would give better *open-domain* similarity but would add
+a third set of weights, a second preprocessing pipeline, and a model that has
+never seen this data.
+
+**The trade-off, stated plainly.** Features optimised for classification
+collapse intra-class variation by construction — that is what makes a classifier
+work. Two different goldfish photographs will look nearly identical in this
+space. The index therefore retrieves *semantically* similar images (same
+category, similar pose and colour) rather than visually near-duplicate ones. For
+"find more like this" that is usually what is wanted; for near-duplicate
+detection it is not, and a perceptual hash would be the right tool.
+
+**Why cosine similarity.** Embeddings are L2-normalised and the index uses inner
+product, which for unit vectors is exactly cosine similarity. Raw L2 distance on
+un-normalised features is dominated by vector magnitude, which for transformer
+features correlates with image contrast rather than content.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+#: ViT-Small's penultimate feature width.
+EMBEDDING_DIM = 384
+
+#: Index size. Enough to make retrieval meaningful across all 200 classes while
+#: keeping the artefact small; the full 100k training set would be a 150 MB
+#: index for a demonstration.
+DEFAULT_INDEX_SIZE = 20_000
+
+
+@dataclass(slots=True)
+class IndexMetadata:
+    """Describes a built similarity index."""
+
+    num_vectors: int
+    embedding_dim: int
+    metric: str
+    source_model: str
+    image_size: int
+    index_type: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "num_vectors": self.num_vectors,
+            "embedding_dim": self.embedding_dim,
+            "metric": self.metric,
+            "source_model": self.source_model,
+            "image_size": self.image_size,
+            "index_type": self.index_type,
+        }
+
+
+def build_embedding_model(run_dir: Path) -> tuple[Any, dict[str, Any]]:
+    """Rebuild the fine-tuned backbone with its classifier head removed.
+
+    ``num_classes=0`` makes timm return pooled features instead of logits. The
+    fine-tuned weights are loaded with ``strict=False`` because the checkpoint
+    contains head parameters this model does not have; the return value is
+    checked so that a genuinely incomplete load still fails.
+    """
+    import timm
+    from safetensors.torch import load_file
+
+    config = json.loads((run_dir / "config.json").read_text())
+    model_name = config["model"]["name"]
+
+    weights_root = run_dir / "accelerate_states" / "weights"
+    candidates = sorted(weights_root.glob("epoch_*"), key=lambda p: int(p.name.split("_")[1]))
+    if not candidates:
+        raise FileNotFoundError(f"No weights under {weights_root}")
+
+    model = timm.create_model(model_name, pretrained=False, num_classes=0)
+    state_dict = load_file(candidates[-1] / "model.safetensors")
+
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+
+    # Only the classifier head may be absent. Anything else means the backbone
+    # is partially random, which would produce plausible-looking but meaningless
+    # embeddings.
+    unexpected_non_head = [
+        k for k in unexpected if not k.startswith(("head.", "fc.", "classifier."))
+    ]
+    if missing or unexpected_non_head:
+        raise RuntimeError(
+            f"Unexpected weight mismatch loading the embedding backbone. "
+            f"Missing: {missing}. Unexpected (non-head): {unexpected_non_head}."
+        )
+
+    model.eval()
+    logger.info("Built embedding model from %s (%d-d features)", model_name, model.num_features)
+    return model, {
+        "model_name": model_name,
+        "image_size": config["dataloader"]["image_size"],
+        "embedding_dim": model.num_features,
+    }
+
+
+def export_embedding_onnx(
+    run_dir: Path,
+    output_path: Path,
+    *,
+    verify: bool = True,
+) -> dict[str, Any]:
+    """Export the backbone as an ONNX embedding extractor.
+
+    L2 normalisation is baked into the graph so the serving code cannot forget
+    it. An un-normalised query against a normalised index silently returns
+    rankings ordered by vector magnitude rather than similarity.
+    """
+    import torch
+    from torch import nn
+
+    from models.optimisation.export import ExportError
+
+    model, metadata = build_embedding_model(run_dir)
+
+    class NormalisedEmbedder(nn.Module):
+        """Wraps the backbone to emit unit-norm embeddings."""
+
+        def __init__(self, backbone: nn.Module) -> None:
+            super().__init__()
+            self.backbone = backbone
+
+        def forward(self, images: torch.Tensor) -> torch.Tensor:
+            features = self.backbone(images)
+            return torch.nn.functional.normalize(features, p=2.0, dim=-1)
+
+    wrapper = NormalisedEmbedder(model).eval()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    size = metadata["image_size"]
+    dummy = torch.randn(2, 3, size, size)
+
+    logger.info("Exporting embedding model to ONNX")
+    try:
+        torch.onnx.export(
+            wrapper,
+            (dummy,),
+            str(output_path),
+            input_names=["images"],
+            output_names=["embeddings"],
+            dynamic_axes={"images": {0: "batch_size"}, "embeddings": {0: "batch_size"}},
+            opset_version=18,
+            do_constant_folding=True,
+        )
+    except Exception as exc:
+        raise ExportError(f"Embedding ONNX export failed: {exc}") from exc
+
+    _consolidate(output_path)
+
+    import onnx
+
+    onnx.checker.check_model(onnx.load(str(output_path)))
+
+    max_diff = None
+    if verify:
+        max_diff = _verify_embeddings(wrapper, output_path, size)
+        logger.info("PyTorch vs ONNX Runtime max |diff| = %.3e", max_diff)
+        if max_diff > 1e-4:
+            raise ExportError(
+                f"Embedding export diverges from PyTorch (max |diff| = {max_diff:.3e})"
+            )
+
+    metadata["max_abs_diff"] = max_diff
+    return metadata
+
+
+def _consolidate(onnx_path: Path) -> None:
+    """Inline external tensor data so the artefact is a single file."""
+    import onnx
+
+    sidecar = onnx_path.with_suffix(onnx_path.suffix + ".data")
+    if not sidecar.exists():
+        return
+    model = onnx.load(str(onnx_path), load_external_data=True)
+    onnx.save(model, str(onnx_path), save_as_external_data=False)
+    sidecar.unlink()
+
+
+def _verify_embeddings(wrapper: Any, onnx_path: Path, image_size: int) -> float:
+    """Compare PyTorch and ONNX embeddings, and confirm they are unit-norm."""
+    import onnxruntime as ort
+    import torch
+
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    input_name = session.get_inputs()[0].name
+    generator = torch.Generator().manual_seed(0)
+    max_diff = 0.0
+
+    for batch_size in (1, 3):
+        sample = torch.randn(batch_size, 3, image_size, image_size, generator=generator)
+        with torch.no_grad():
+            expected = wrapper(sample).numpy()
+        actual = session.run(None, {input_name: sample.numpy()})[0]
+
+        max_diff = max(max_diff, float(np.abs(expected - actual).max()))
+
+        # Normalisation must survive the export: an un-normalised query against
+        # a normalised index ranks by magnitude rather than similarity.
+        norms = np.linalg.norm(actual, axis=-1)
+        if not np.allclose(norms, 1.0, atol=1e-4):
+            raise RuntimeError(f"Exported embeddings are not unit-norm: {norms}")
+
+    return max_diff
+
+
+def build_index(
+    embeddings: np.ndarray,
+    labels: list[int],
+    paths: list[str],
+    output_dir: Path,
+    *,
+    source_model: str,
+    image_size: int,
+) -> IndexMetadata:
+    """Build and persist a FAISS index over the supplied embeddings.
+
+    ``IndexFlatIP`` performs exact search. An approximate index (IVF, HNSW)
+    would be faster above roughly a million vectors, but at 20,000 exact search
+    takes under a millisecond and avoids both a training step and the recall
+    loss that approximation brings. Choosing an approximate index before the
+    exact one is too slow is premature.
+    """
+    import faiss
+
+    if embeddings.dtype != np.float32:
+        embeddings = embeddings.astype(np.float32)
+
+    # FAISS requires contiguous memory; a sliced or transposed array will
+    # otherwise be silently copied or rejected depending on version.
+    embeddings = np.ascontiguousarray(embeddings)
+
+    norms = np.linalg.norm(embeddings, axis=-1)
+    if not np.allclose(norms, 1.0, atol=1e-3):
+        raise ValueError(
+            "Embeddings are not unit-norm, so inner product will not equal cosine similarity."
+        )
+
+    index = faiss.IndexFlatIP(embeddings.shape[1])
+    index.add(embeddings)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    faiss.write_index(index, str(output_dir / "similarity.index"))
+
+    # Labels and paths are stored alongside: the index returns row numbers, and
+    # without this mapping a result is an integer with no meaning.
+    (output_dir / "similarity_manifest.json").write_text(
+        json.dumps({"labels": labels, "paths": paths}, indent=2)
+    )
+
+    metadata = IndexMetadata(
+        num_vectors=int(index.ntotal),
+        embedding_dim=int(embeddings.shape[1]),
+        metric="cosine",
+        source_model=source_model,
+        image_size=image_size,
+        index_type="IndexFlatIP",
+    )
+    (output_dir / "similarity_metadata.json").write_text(json.dumps(metadata.as_dict(), indent=2))
+
+    logger.info(
+        "Built FAISS index: %d vectors of dimension %d (%s)",
+        metadata.num_vectors,
+        metadata.embedding_dim,
+        metadata.index_type,
+    )
+    return metadata

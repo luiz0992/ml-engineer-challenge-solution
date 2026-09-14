@@ -136,6 +136,53 @@ jobs:
             junit.xml
           retention-days: 14
 
+  model-quality:
+    name: Model regression gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev --frozen
+
+      - name: Validate the committed baseline
+        # The baseline itself is an artefact that can rot. A malformed or
+        # incomplete one silently weakens every future comparison, so it is
+        # checked rather than trusted.
+        run: |
+          uv run python - <<'PYTHON'
+          from pathlib import Path
+          from models.validation.regression import DEFAULT_SPECS, load_baseline
+
+          baseline = load_baseline(Path("models/validation/baselines/classifier.json"))
+          missing = [s.name for s in DEFAULT_SPECS if s.name not in baseline["metrics"]]
+          if missing:
+              raise SystemExit(f"Baseline is missing gated metrics: {missing}")
+
+          print(f"Baseline {baseline['version']} recorded {baseline['recorded_at']}")
+          for name, value in sorted(baseline["metrics"].items()):
+              print(f"  {name:20s} {value}")
+          PYTHON
+
+      - name: Check for regressions
+        # Skipped when no trained run is present: model artefacts are not
+        # committed, so this gate is meaningful on a release branch where the
+        # pipeline has produced one, and a no-op on an ordinary pull request.
+        run: |
+          if [ -d models/artifacts/runs ] && [ -n "$(ls -A models/artifacts/runs 2>/dev/null)" ]; then
+            uv run python scripts/check_regression.py
+          else
+            echo "No trained run in the workspace; skipping the comparison."
+            echo "The gate runs where the training pipeline has produced artefacts."
+          fi
+
   security:
     name: Security scan
     runs-on: ubuntu-latest

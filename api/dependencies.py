@@ -17,6 +17,7 @@ from api.services.cache_service import CacheService
 from api.services.detection_service import DetectionService
 from api.services.inference_service import InferenceService
 from api.services.model_service import ModelService
+from api.services.similarity_service import SimilarityService
 
 
 def get_model_service(request: Request) -> ModelService:
@@ -53,6 +54,17 @@ def get_detection_service(request: Request) -> DetectionService:
         raise ModelUnavailableError(
             "No detection model is deployed in this environment. Classification "
             "is available at POST /api/v1/classify."
+        )
+    return service
+
+
+def get_similarity_service(request: Request) -> SimilarityService:
+    """Return the similarity service, or 503 when no index is built."""
+    service = getattr(request.app.state, "similarity_service", None)
+    if service is None:
+        raise ModelUnavailableError(
+            "Similarity search is not available in this environment. Build the "
+            "index with `python scripts/build_similarity_index.py`."
         )
     return service
 

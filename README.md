@@ -4,10 +4,10 @@ A production-oriented MLOps system that serves three computer-vision models —
 image classification, object detection, and image similarity search — behind a
 single authenticated, rate-limited, observable HTTP API.
 
-Classification and object detection are served today; image similarity search
-was scoped but not implemented. See
-[What is missing](docs/technical-writeup.md#7-what-is-missing-and-why) for an
-explicit list of gaps.
+Three models served: image classification, object detection, and image
+similarity search. See
+[What is missing](docs/technical-writeup.md#8-what-is-missing-and-why) for an
+explicit list of remaining gaps.
 
 ---
 
@@ -166,6 +166,45 @@ python scripts/setup/download_datasets.py --dataset tiny_imagenet
 uv run python -m models.training.train
 ```
 
+### Object detection — COCO (80 classes)
+
+RT-DETR R18, Apache-2.0, used pretrained. **15 ms** per image. Verified on COCO
+`000000039769`: two cats, two remotes, and a sofa, all at 0.74–0.95 confidence.
+
+Licensing drove the model choice: Ultralytics YOLOv8/v11 are AGPL-3.0, which
+obliges anyone offering the service over a network to publish their source.
+
+### Image similarity search
+
+The fine-tuned classifier backbone with its head removed, indexed with FAISS
+over 20,000 training images.
+
+| Metric | Value |
+| --- | --- |
+| Precision@5 | **92%** |
+| Query latency | ~5 ms |
+| Embedding | 384-d, L2-normalised, cosine similarity |
+
+Retrieves **semantically** similar images rather than near-duplicates —
+classification features collapse intra-class variation by construction. For
+near-duplicate detection a perceptual hash would be the right tool.
+
+### Model validation
+
+`models/validation/` provides drift detection, A/B testing, and regression
+gates, all operating on the inference audit trail.
+
+```bash
+uv run python scripts/analyse_drift.py --baseline-days 7 --current-days 1
+uv run python scripts/check_regression.py
+```
+
+Drift uses PSI for categorical features and Kolmogorov-Smirnov for continuous
+ones, with **severity driven by effect size rather than p-value** — at
+production volumes a hypothesis test reports permanent drift. A/B comparisons
+likewise require a difference to be both statistically significant *and*
+materially large before it blocks a rollout.
+
 ### Inference performance
 
 ViT-Small/16 at 224x224, batch 32, RTX 5000 Ada. Full matrix in
@@ -222,7 +261,8 @@ Six endpoints under `/api/v1`, plus unprefixed probes for orchestrators.
 | --- | --- | --- | --- |
 | POST | `/api/v1/auth/token` | API key | Exchange an API key for a bearer token |
 | POST | `/api/v1/classify` | Bearer | Classify a single image |
-| POST | `/api/v1/detect` | Bearer | Object detection |
+| POST | `/api/v1/detect` | Bearer | Object detection (80 COCO classes) |
+| POST | `/api/v1/similar` | Bearer | Find visually similar images |
 | POST | `/api/v1/batch` | Bearer | Submit an async batch job (202 + job ID) |
 | GET | `/api/v1/batch/{job_id}` | Bearer | Poll job progress and results |
 | GET | `/api/v1/models` | none | Registered models and metadata |

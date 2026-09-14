@@ -343,6 +343,75 @@ class ModelService:
     def get_detector(self, version: str | None = None) -> LoadedModel:
         return self.get("rtdetr-coco-detector", version)
 
+    def get_embedder(self, version: str | None = None) -> LoadedModel:
+        return self.get("tiny-imagenet-embedder", version)
+
+    def load_embedder(
+        self,
+        *,
+        name: str = "tiny-imagenet-embedder",
+        version: str = "v1",
+        make_active: bool = True,
+    ) -> LoadedModel:
+        """Load the embedding model backing similarity search.
+
+        Shares the classifier's label list: the embedder is the same backbone
+        with its head removed, so an indexed image's class is named from the
+        same mapping.
+        """
+        artifacts = self.settings.artifacts_dir
+        artifact = artifacts / "onnx" / "embedder_fp32.onnx"
+
+        if not artifact.exists():
+            raise ModelUnavailableError(
+                "Embedding artefacts not found. Export them with "
+                "`python scripts/prepare_artifacts.py --with-similarity`.",
+                details={"expected": str(artifact)},
+            )
+
+        metadata = self._read_classifier_metadata(artifacts)
+
+        preferred = self.settings.inference_backend
+        chain = (
+            _FALLBACK_CHAINS.get(preferred, (preferred,))
+            if self.settings.enable_graceful_degradation
+            else (preferred,)
+        )
+        chain = tuple(c for c in chain if c is not InferenceBackend.ONNX_INT8)
+
+        failures: list[str] = []
+        for candidate in chain:
+            try:
+                session, input_name = self._create_session(artifact, candidate)
+                self._warmup(session, input_name, metadata["image_size"], candidate)
+            except Exception as exc:
+                failures.append(f"{candidate.value}: {type(exc).__name__}: {exc}")
+                continue
+
+            model = LoadedModel(
+                name=name,
+                version=version,
+                task=TaskType.EMBEDDING,
+                backend=candidate,
+                session=session,
+                input_name=input_name,
+                class_names=metadata["class_names"],
+                wnids=metadata["wnids"],
+                image_size=metadata["image_size"],
+                artifact_path=artifact,
+                loaded_at=datetime.now(UTC),
+                metrics={},
+                degraded_from=preferred if candidate is not preferred else None,
+            )
+            self.register(model, make_active=make_active)
+            logger.info("model_loaded", model=model.key, backend=candidate.value, task="embedding")
+            return model
+
+        raise ModelUnavailableError(
+            "No inference backend could be initialised for the embedder.",
+            details={"attempts": failures},
+        )
+
     def load_detector(
         self,
         *,

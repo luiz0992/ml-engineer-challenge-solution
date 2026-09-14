@@ -37,11 +37,22 @@ It also exports cleanly: anchor-free, NMS-free, with a one-to-one assignment
 loss that suppresses duplicates during training. NMS is data-dependent and
 exports poorly, and is the usual source of deployment pain for detectors.
 
-### What was not built
+### Similarity search: the classifier backbone reused
 
-A third model (similarity search over classifier embeddings) was scoped but not
-implemented. The brief asks for three; two are delivered. Stating that plainly
-is more useful than a half-working third.
+The third model is the fine-tuned classifier with its head removed, indexed with
+FAISS. The trade-off is explicit: features optimised for classification collapse
+intra-class variation *by construction*, so this retrieves semantically similar
+images rather than visually near-duplicate ones. For "more like this" that is
+the intent; for near-duplicate detection it is the wrong tool and a perceptual
+hash would be correct.
+
+Reuse costs one extra export and no additional training. A separate CLIP model
+would give better open-domain similarity at the cost of a third set of weights,
+a second preprocessing pipeline, and a model that has never seen this data.
+
+Measured precision@5 is 92% across five query classes, at ~5 ms per query over
+20,000 indexed images. Quality varies sharply by class — distinctive categories
+returned 5/5 at similarity 0.72-0.84, an ambiguous one returned 3/5 at 0.45.
 
 ---
 
@@ -267,21 +278,86 @@ image digest column is there to measure.
 
 ---
 
-## 7. What is missing, and why
+## 7. Model validation
+
+Three components in `models/validation/`, all operating on the `inference_logs`
+audit trail.
+
+### Drift detection
+
+Two statistics, chosen for different variable types:
+
+**PSI** for categorical features (predicted class, image format). The industry
+convention, with established interpretation bands (<0.1 none, 0.1-0.25
+moderate, >0.25 significant) and insensitive to sample size in the way a
+hypothesis test is not. The epsilon guard matters: a category present in one
+window and absent in the other otherwise yields infinite PSI, and that is
+exactly the case worth detecting.
+
+**Kolmogorov-Smirnov** for continuous features (dimensions, latency).
+Distribution-free and needs no binning. **Severity is driven by the KS
+statistic, never the p-value** — at 50,000 samples per window a hypothesis test
+rejects the null for differences far too small to matter, so a p-value-driven
+alert would report permanent drift. Asserted by a test that feeds two
+distributions differing by 0.3 in 50,000 samples and requires severity `none`.
+
+Prediction drift is the more practical signal, because it needs no labels.
+Ground truth for production traffic arrives late or never, so accuracy cannot be
+monitored directly; a sustained change in *what the model predicts* is the
+earliest available warning.
+
+### A/B testing
+
+**Assignment is deterministic per user**, by hashing `experiment + user_id`. A
+user stays on the arm they were assigned. Random per-request assignment would
+give the same caller different versions for identical inputs, and would
+correlate observations within a user across arms — violating the independence a
+significance test assumes. The experiment name is in the hash so a user unlucky
+in one test is not systematically in every challenger arm; verified at ~50%
+cross-experiment agreement.
+
+Comparisons report **effect size and confidence intervals alongside p-values**,
+and a change must be both significant *and* materially large before it blocks a
+rollout. Verified: a 0.5% latency difference at n=50,000 is reported significant
+(p ≈ 0) and immaterial, with the recommendation "no material difference". A
+significance-only gate would block every release.
+
+Welch's t-test rather than Student's, because arms have no reason to share a
+variance — a slower backend is usually also more variable.
+
+### Regression gates
+
+Per-metric, directional tolerances against a **committed** baseline. Accuracy
+permits 2% relative degradation with an absolute floor of 80%; latency permits
+20%, deliberately loose because CI runners are noisy and a gate that produces
+false failures trains people to ignore it.
+
+The absolute floor exists because a relative tolerance alone permits gradual
+erosion — each release individually within tolerance while quality slides across
+many. The baseline is committed and updated only by an explicit, reviewed step,
+for the same reason: a baseline recomputed from recent runs drifts upward and
+quality erodes without any single comparison ever failing.
+
+A **missing** metric fails the check. Silently passing a comparison that could
+not be made would let an unmeasured regression through, which is the opposite of
+what a gate is for.
+
+---
+
+## 8. What is missing, and why
 
 Stated plainly rather than omitted.
 
 | Gap | Reason |
 | --- | --- |
-| Third model (similarity search) | Scoped, not reached |
-| Drift detection, A/B framework | `models/validation/` is an empty package; the audit schema was designed for it |
-| Performance regression gates | No recorded baseline to compare against |
 | Detector evaluation | Published COCO mAP is quoted; no independent evaluation run |
 | Calibration and per-class metrics | Only aggregate accuracy measured |
+| Similarity precision@5 across all classes | Measured on 5 of 200; per-class variation is demonstrably large |
 | GPU in containers | Compose runs ONNX Runtime on CPU (~170 ms); GPU passthrough needs device reservations and `onnxruntime-gpu` |
 | Postgres partitioning and retention | Needed before sustained production write volume |
+| Live A/B traffic splitting in the API | The framework and analysis exist; the serving path does not yet route by variant |
+| Automated drift alerting | `scripts/analyse_drift.py` runs on demand; no scheduled job or alert wiring |
 
-The drift and A/B work is the most valuable of these, and the schema and metrics
-to support it already exist — `inference_logs` records the input fingerprint,
-predicted class, and model version needed to compare distributions across
-versions over time.
+The last two are the natural next step: the assignment logic, the audit schema,
+and the comparison statistics all exist, and wiring them into the request path
+plus a scheduled job is integration work rather than new design.

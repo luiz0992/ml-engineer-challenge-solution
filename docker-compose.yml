@@ -52,7 +52,13 @@ services:
       ml-api:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health/live"]
+      # 127.0.0.1, not localhost. nginx binds 0.0.0.0:80 (IPv4 only) while
+      # `localhost` resolves to ::1 inside the container, so a probe using the
+      # hostname connects over IPv6 to a port nothing is listening on and fails
+      # with "connection refused" -- while the gateway is in fact serving
+      # traffic perfectly. An orchestrator would restart a healthy container in
+      # a loop.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/health/live"]
       interval: 15s
       timeout: 5s
       retries: 3

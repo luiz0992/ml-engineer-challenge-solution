@@ -334,6 +334,123 @@
         }
       }
     },
+    "/api/v1/similar": {
+      "post": {
+        "tags": [
+          "similarity"
+        ],
+        "summary": "Find visually similar images",
+        "description": "Retrieve the most similar indexed images, ranked by cosine similarity.\n\nResults are *semantically* similar rather than visually near-duplicate: the\nembeddings come from a classification backbone, which collapses intra-class\nvariation by design. Two different photographs of the same subject will rank\nas highly similar.",
+        "operationId": "find_similar_api_v1_similar_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "top_k",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Neighbours to return.",
+              "default": 10,
+              "title": "Top K"
+            },
+            "description": "Neighbours to return."
+          },
+          {
+            "name": "min_similarity",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "maximum": 1.0,
+              "minimum": -1.0,
+              "description": "Discard results below this cosine similarity.",
+              "default": 0.0,
+              "title": "Min Similarity"
+            },
+            "description": "Discard results below this cosine similarity."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_find_similar_api_v1_similar_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimilarityResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Too Many Requests"
+          },
+          "503": {
+            "description": "Similarity index not built in this environment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/batch": {
       "post": {
         "tags": [
@@ -997,6 +1114,21 @@
         ],
         "title": "Body_detect_objects_api_v1_detect_post"
       },
+      "Body_find_similar_api_v1_similar_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "description": "Query image."
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_find_similar_api_v1_similar_post"
+      },
       "BoundingBox": {
         "properties": {
           "x_min": {
@@ -1551,6 +1683,83 @@
         ],
         "title": "Prediction",
         "description": "One ranked classification result."
+      },
+      "SimilarImage": {
+        "properties": {
+          "rank": {
+            "type": "integer",
+            "title": "Rank",
+            "description": "1-based position, most similar first."
+          },
+          "similarity": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": -1.0,
+            "title": "Similarity",
+            "description": "Cosine similarity; 1.0 is identical."
+          },
+          "label": {
+            "type": "string",
+            "title": "Label",
+            "description": "Class of the indexed image."
+          },
+          "class_id": {
+            "type": "integer",
+            "title": "Class Id"
+          },
+          "reference": {
+            "type": "string",
+            "title": "Reference",
+            "description": "Identifier of the indexed image, relative to the dataset root."
+          }
+        },
+        "type": "object",
+        "required": [
+          "rank",
+          "similarity",
+          "label",
+          "class_id",
+          "reference"
+        ],
+        "title": "SimilarImage",
+        "description": "One retrieved neighbour."
+      },
+      "SimilarityResponse": {
+        "properties": {
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/SimilarImage"
+            },
+            "type": "array",
+            "title": "Results"
+          },
+          "index_size": {
+            "type": "integer",
+            "title": "Index Size",
+            "description": "Number of images searched."
+          },
+          "inference_time_ms": {
+            "type": "number",
+            "title": "Inference Time Ms"
+          },
+          "correlation_id": {
+            "type": "string",
+            "title": "Correlation Id"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ModelProvenance"
+          }
+        },
+        "type": "object",
+        "required": [
+          "results",
+          "index_size",
+          "inference_time_ms",
+          "correlation_id",
+          "provenance"
+        ],
+        "title": "SimilarityResponse",
+        "description": "Result of a similarity search."
       },
       "TaskType": {
         "type": "string",

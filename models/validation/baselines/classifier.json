@@ -1,0 +1,13 @@
+{
+  "model_name": "tiny-imagenet-classifier",
+  "version": "v1",
+  "recorded_at": "2026-09-14T17:37:03+00:00",
+  "metrics": {
+    "acc_top1": 0.8588,
+    "acc_top5": 0.9654,
+    "latency_p50_ms": 1.28,
+    "latency_p95_ms": 1.3,
+    "artifact_size_mb": 87.9
+  },
+  "notes": "Measured on the full 10,000-image Tiny-ImageNet validation split. Latency is ONNX Runtime CUDA at batch 1 on an RTX 5000 Ada, which is the serving default; see benchmarks/README.md for the full matrix."
+}

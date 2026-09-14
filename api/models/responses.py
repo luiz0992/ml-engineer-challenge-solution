@@ -154,6 +154,28 @@ class BatchJobStatusResponse(ResponseModel):
         return (self.completed_items + self.failed_items) / self.total_items
 
 
+class SimilarImage(ResponseModel):
+    """One retrieved neighbour."""
+
+    rank: int = Field(description="1-based position, most similar first.")
+    similarity: float = Field(ge=-1.0, le=1.0, description="Cosine similarity; 1.0 is identical.")
+    label: str = Field(description="Class of the indexed image.")
+    class_id: int
+    reference: str = Field(
+        description="Identifier of the indexed image, relative to the dataset root."
+    )
+
+
+class SimilarityResponse(ResponseModel):
+    """Result of a similarity search."""
+
+    results: list[SimilarImage]
+    index_size: int = Field(description="Number of images searched.")
+    inference_time_ms: float
+    correlation_id: str
+    provenance: ModelProvenance
+
+
 class ModelInfo(ResponseModel):
     """Metadata for one registered model version."""
 

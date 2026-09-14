@@ -57,6 +57,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also export the RT-DETR object detector (downloads ~80 MB)",
     )
     parser.add_argument(
+        "--with-similarity",
+        action="store_true",
+        help="Also export the embedding model for similarity search",
+    )
+    parser.add_argument(
+        "--all-models",
+        action="store_true",
+        help="Export every model: classifier, detector, and embedder",
+    )
+    parser.add_argument(
         "--calibration-samples",
         type=int,
         default=256,
@@ -122,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- Detection --------------------------------------------------------
     detector_path = onnx_dir / "detector_fp32.onnx"
-    if args.with_detection and (not detector_path.exists() or args.force):
+    if (args.with_detection or args.all_models) and (not detector_path.exists() or args.force):
         from models.optimisation.export_detection import (
             export_detection_onnx,
             write_detection_metadata,
@@ -138,23 +148,24 @@ def main(argv: list[str] | None = None) -> int:
     elif detector_path.exists():
         logger.info("%s already exists", detector_path)
 
-    # --- Detection --------------------------------------------------------
-    detector_path = onnx_dir / "detector_fp32.onnx"
-    if args.with_detection and (not detector_path.exists() or args.force):
-        from models.optimisation.export_detection import (
-            export_detection_onnx,
-            write_detection_metadata,
-        )
+    # --- Similarity embeddings ---------------------------------------------
+    embedder_path = onnx_dir / "embedder_fp32.onnx"
+    if (args.with_similarity or args.all_models) and (not embedder_path.exists() or args.force):
+        from models.optimisation.export_embedding import export_embedding_onnx
 
-        metadata = export_detection_onnx(detector_path)
-        write_detection_metadata(artifacts_dir, metadata)
+        embedding_meta = export_embedding_onnx(run_dir, embedder_path)
         logger.info(
-            "Exported detector: %d classes, max |torch - onnx| = %.3e",
-            metadata["num_classes"],
-            metadata["max_abs_diff"],
+            "Exported embedder: %d-d features, max |torch - onnx| = %.3e",
+            embedding_meta["embedding_dim"],
+            embedding_meta["max_abs_diff"],
         )
-    elif detector_path.exists():
-        logger.info("%s already exists", detector_path)
+        if not (artifacts_dir / "similarity.index").exists():
+            logger.info(
+                "No similarity index yet. Build one with:\n"
+                "  uv run python scripts/build_similarity_index.py"
+            )
+    elif embedder_path.exists():
+        logger.info("%s already exists", embedder_path)
 
     logger.info("Artifacts ready in %s", artifacts_dir)
     for path in sorted(artifacts_dir.rglob("*")):

@@ -305,3 +305,100 @@ def tiny_imagenet_val() -> Path:
             "python scripts/setup/download_datasets.py --dataset tiny_imagenet"
         )
     return root
+
+
+# ---------------------------------------------------------------------------
+# Similarity search
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="session")
+def synthetic_embedder(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A tiny ONNX model emitting unit-norm embeddings.
+
+    Mirrors the real embedder's contract -- dynamic batch, L2-normalised
+    output -- in a few kilobytes, so similarity tests need no 88 MB artefact.
+    """
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    dim = 8
+    rng = np.random.default_rng(1)
+    weight = numpy_helper.from_array(rng.standard_normal((3, dim)).astype(np.float32), name="w")
+
+    nodes = [
+        helper.make_node("GlobalAveragePool", ["images"], ["pooled"]),
+        helper.make_node("Flatten", ["pooled"], ["flat"], axis=1),
+        helper.make_node("MatMul", ["flat", "w"], ["raw"]),
+        # L2-normalise, exactly as the real export does.
+        helper.make_node("ReduceL2", ["raw"], ["norm"], keepdims=1, axes=[1]),
+        helper.make_node("Div", ["raw", "norm"], ["embeddings"]),
+    ]
+
+    graph = helper.make_graph(
+        nodes,
+        "synthetic_embedder",
+        inputs=[
+            helper.make_tensor_value_info(
+                "images", TensorProto.FLOAT, ["batch", 3, TEST_IMAGE_SIZE, TEST_IMAGE_SIZE]
+            )
+        ],
+        outputs=[helper.make_tensor_value_info("embeddings", TensorProto.FLOAT, ["batch", dim])],
+        initializer=[weight],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)], ir_version=10)
+    onnx.checker.check_model(model)
+
+    path = tmp_path_factory.mktemp("embedder") / "embedder_fp32.onnx"
+    onnx.save(model, str(path))
+    return path
+
+
+@pytest.fixture
+def similarity_artifacts(artifacts_dir: Path, synthetic_embedder: Path) -> Path:
+    """An artifacts directory with an embedder and a small FAISS index."""
+    import shutil
+
+    import faiss
+
+    shutil.copy2(synthetic_embedder, artifacts_dir / "onnx" / "embedder_fp32.onnx")
+
+    dim, count = 8, 50
+    rng = np.random.default_rng(2)
+    vectors = rng.standard_normal((count, dim)).astype(np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+
+    index = faiss.IndexFlatIP(dim)
+    index.add(np.ascontiguousarray(vectors))
+    faiss.write_index(index, str(artifacts_dir / "similarity.index"))
+
+    (artifacts_dir / "similarity_manifest.json").write_text(
+        json.dumps(
+            {
+                "labels": [i % NUM_TEST_CLASSES for i in range(count)],
+                "paths": [f"train/class_{i % NUM_TEST_CLASSES}/img_{i}.JPEG" for i in range(count)],
+            }
+        )
+    )
+    (artifacts_dir / "similarity_metadata.json").write_text(
+        json.dumps(
+            {
+                "num_vectors": count,
+                "embedding_dim": dim,
+                "metric": "cosine",
+                "source_model": "synthetic",
+                "image_size": TEST_IMAGE_SIZE,
+                "index_type": "IndexFlatIP",
+            }
+        )
+    )
+    return artifacts_dir
+
+
+@pytest.fixture
+def similarity_service(similarity_artifacts: Path, settings: Settings):
+    from api.services.model_service import ModelService
+    from api.services.similarity_service import SimilarityIndex, SimilarityService
+
+    service = ModelService(settings)
+    embedder = service.load_embedder()
+    index = SimilarityIndex.load(similarity_artifacts)
+    return SimilarityService(service, index, settings, embedder.class_names)
