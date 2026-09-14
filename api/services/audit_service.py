@@ -34,10 +34,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Any
-
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.db.models import InferenceLog
 from api.logging_config import get_logger
@@ -79,7 +79,12 @@ class AuditService:
 
     def __init__(
         self,
-        session_factory: async_sessionmaker[AsyncSession] | None,
+        # Typed as a callable rather than async_sessionmaker specifically: the
+        # service only ever calls it and uses the result as an async context
+        # manager, so requiring the concrete SQLAlchemy type would exclude any
+        # equivalent -- including the capturing double the tests use, which is
+        # precisely the substitutability the narrow type was preventing.
+        session_factory: Callable[[], AbstractAsyncContextManager[Any]] | None,
         *,
         queue_size: int = DEFAULT_QUEUE_SIZE,
         batch_size: int = DEFAULT_BATCH_SIZE,

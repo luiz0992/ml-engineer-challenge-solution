@@ -173,6 +173,9 @@ warn_unused_ignores = true
 ignore_missing_imports = true
 plugins = ["pydantic.mypy"]
 
+# Tests are type-checked (see scripts/lint), but pytest fixtures and
+# parametrised helpers are frequently left unannotated by convention, and
+# requiring annotations on them adds noise without catching anything.
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false

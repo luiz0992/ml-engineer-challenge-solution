@@ -159,10 +159,13 @@ class TestFailsOpen:
         """Recording must not be awaited, so it cannot add request latency."""
         service = AuditService(_CapturingSessionFactory(), batch_size=10)
 
-        # A synchronous call: if this were a coroutine the request path would
-        # have to await the audit trail.
-        result = service.record(**_record())
-        assert result is None
+        # A synchronous call: if record() were a coroutine this would return an
+        # un-awaited object rather than queueing anything, and the request path
+        # would have to await the audit trail.
+        service.record(**_record())
+
+        assert service.stats.queued == 1
+        assert not asyncio.iscoroutinefunction(service.record)
 
 
 class TestBoundedQueue:

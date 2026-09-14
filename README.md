@@ -481,6 +481,10 @@ per-class directories before loading.
 
 ## Documentation
 
+Start with the [documentation index](docs/README.md), which carries every
+measured result in one table plus a catalogue of the defects found during
+development and how each was caught.
+
 | Document | Contents |
 | --- | --- |
 | [Technical write-up](docs/technical-writeup.md) | Model selection, optimisation results, architecture decisions, scalability, and an explicit list of gaps |
@@ -489,6 +493,7 @@ per-class directories before loading.
 | [Benchmark results](benchmarks/README.md) | Generated latency matrix across backends |
 | [Benchmark analysis](benchmarks/ANALYSIS.md) | Interpretation and deployment recommendation |
 | [OpenAPI spec](docs/openapi.json) | Exported schema; also served live at `/openapi.json` |
+| [Documentation index](docs/README.md) | All results in one place, and what is not done |
 
 Four silent bugs found during development — two preprocessing defects, a
 backend that created a working session but could not infer, and a metrics

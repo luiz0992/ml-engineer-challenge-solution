@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
 import numpy as np
 import pytest
@@ -221,7 +222,7 @@ class TestExperimentAnalysis:
 # Regression gate
 # ---------------------------------------------------------------------------
 class TestRegressionGate:
-    BASELINE = {
+    BASELINE: dict[str, Any] = {
         "model_name": "classifier",
         "version": "v1",
         "metrics": {

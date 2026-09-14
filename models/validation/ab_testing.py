@@ -32,8 +32,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 logger = logging.getLogger(__name__)
+
+#: See the note in models.validation.drift: these helpers call np.asarray, so
+#: the annotation must admit arrays as well as plain sequences.
+Numeric = Sequence[float] | npt.NDArray[np.floating]
 
 #: Minimum observations per arm before a comparison is reported. Below this the
 #: confidence interval is wider than any effect worth detecting.
@@ -202,8 +207,8 @@ def summarise_arm(
 
 def compare_means(
     metric: str,
-    control: Sequence[float],
-    treatment: Sequence[float],
+    control: Numeric,
+    treatment: Numeric,
     *,
     material_threshold: float = 0.05,
 ) -> Comparison:

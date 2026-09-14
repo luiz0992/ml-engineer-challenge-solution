@@ -7,6 +7,8 @@ with constructed inputs whose correct output is known exactly.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -125,7 +127,12 @@ class TestDetectionDecoding:
         from api.services.detection_service import DetectionService
 
         model = SimpleNamespace(class_names=[f"class_{i}" for i in range(4)])
-        params = {"threshold": 0.5, "max_detections": 100, "width": 100, "height": 100}
+        params: dict[str, Any] = {
+            "threshold": 0.5,
+            "max_detections": 100,
+            "width": 100,
+            "height": 100,
+        }
         params.update(kwargs)
         return DetectionService._decode(
             scores,

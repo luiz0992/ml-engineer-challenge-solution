@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,8 +20,8 @@ from api.services.experiment_service import ExperimentRegistry
 pytestmark = pytest.mark.unit
 
 
-def _config(**overrides: object) -> dict:
-    base = {
+def _config(**overrides: object) -> dict[str, Any]:
+    base: dict[str, Any] = {
         "experiments": [
             {
                 "name": "rollout",
@@ -33,7 +34,7 @@ def _config(**overrides: object) -> dict:
             }
         ]
     }
-    base["experiments"][0].update(overrides)  # type: ignore[index]
+    base["experiments"][0].update(overrides)
     return base
 
 

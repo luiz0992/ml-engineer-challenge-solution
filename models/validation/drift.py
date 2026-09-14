@@ -46,8 +46,17 @@ from enum import StrEnum
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 logger = logging.getLogger(__name__)
+
+#: Anything these functions can consume: a Python sequence, a numpy array, or a
+#: pandas column. They all call np.asarray internally, so annotating the
+#: narrower Sequence[float] misrepresents the API -- a numpy array does not
+#: satisfy Sequence structurally, and every caller passing one was a type error
+#: that nothing checked.
+Numeric = Sequence[float] | npt.NDArray[np.floating]
+Categorical = Sequence[Any] | npt.NDArray[Any]
 
 #: Conventional PSI interpretation bands.
 PSI_NO_SHIFT = 0.10
@@ -143,8 +152,8 @@ class DriftReport:
 
 
 def population_stability_index(
-    baseline: Sequence[Any],
-    current: Sequence[Any],
+    baseline: Categorical,
+    current: Categorical,
     *,
     epsilon: float = 1e-6,
 ) -> tuple[float, dict[str, float]]:
@@ -183,7 +192,7 @@ def population_stability_index(
     return psi, contributions
 
 
-def kolmogorov_smirnov(baseline: Sequence[float], current: Sequence[float]) -> tuple[float, float]:
+def kolmogorov_smirnov(baseline: Numeric, current: Numeric) -> tuple[float, float]:
     """Two-sample KS test. Returns ``(statistic, p_value)``.
 
     The statistic is the maximum absolute difference between the two empirical
@@ -199,8 +208,8 @@ def kolmogorov_smirnov(baseline: Sequence[float], current: Sequence[float]) -> t
 
 def detect_categorical_drift(
     feature: str,
-    baseline: Sequence[Any],
-    current: Sequence[Any],
+    baseline: Categorical,
+    current: Categorical,
 ) -> DriftResult:
     """Assess drift in a categorical feature using PSI."""
     if len(baseline) < MIN_SAMPLES or len(current) < MIN_SAMPLES:
@@ -240,8 +249,8 @@ def detect_categorical_drift(
 
 def detect_continuous_drift(
     feature: str,
-    baseline: Sequence[float],
-    current: Sequence[float],
+    baseline: Numeric,
+    current: Numeric,
 ) -> DriftResult:
     """Assess drift in a continuous feature using the KS test.
 

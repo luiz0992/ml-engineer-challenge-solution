@@ -7,6 +7,8 @@ so every failure path is asserted explicitly rather than assumed.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
@@ -17,7 +19,7 @@ pytestmark = pytest.mark.unit
 
 class TestCacheKeys:
     def test_identical_inputs_produce_identical_keys(self) -> None:
-        arguments = {
+        arguments: dict[str, Any] = {
             "model_name": "classifier",
             "model_version": "v1",
             "backend": "onnx",
@@ -28,7 +30,11 @@ class TestCacheKeys:
         )
 
     def test_different_images_produce_different_keys(self) -> None:
-        arguments = {"model_name": "c", "model_version": "v1", "backend": "onnx"}
+        arguments: dict[str, Any] = {
+            "model_name": "c",
+            "model_version": "v1",
+            "backend": "onnx",
+        }
         assert CacheService.build_key(b"image-a", **arguments) != CacheService.build_key(
             b"image-b", **arguments
         )
@@ -48,7 +54,11 @@ class TestCacheKeys:
         previous version until the TTL expires — a silent correctness failure
         that looks exactly like a successful deploy.
         """
-        base = {"model_name": "classifier", "model_version": "v1", "backend": "onnx"}
+        base: dict[str, Any] = {
+            "model_name": "classifier",
+            "model_version": "v1",
+            "backend": "onnx",
+        }
         assert CacheService.build_key(b"image", **base) != CacheService.build_key(
             b"image", **{**base, field: value}
         )
@@ -59,14 +69,22 @@ class TestCacheKeys:
         A top_k=1 result served to a top_k=10 request would return four fewer
         predictions than asked for.
         """
-        base = {"model_name": "c", "model_version": "v1", "backend": "onnx"}
+        base: dict[str, Any] = {
+            "model_name": "c",
+            "model_version": "v1",
+            "backend": "onnx",
+        }
         assert CacheService.build_key(
             b"image", **base, options={"top_k": 1}
         ) != CacheService.build_key(b"image", **base, options={"top_k": 10})
 
     def test_option_ordering_does_not_affect_the_key(self) -> None:
         """Semantically identical options must hit the same entry."""
-        base = {"model_name": "c", "model_version": "v1", "backend": "onnx"}
+        base: dict[str, Any] = {
+            "model_name": "c",
+            "model_version": "v1",
+            "backend": "onnx",
+        }
         assert CacheService.build_key(
             b"image", **base, options={"top_k": 5, "probs": True}
         ) == CacheService.build_key(b"image", **base, options={"probs": True, "top_k": 5})
@@ -152,6 +170,7 @@ class TestFailsOpen:
         Returning it would propagate corruption into a response; leaving it in
         place would make every subsequent request for that key fail.
         """
+        assert cache_service._redis is not None
         await cache_service._redis.set("k", "{not valid json")
 
         assert await cache_service.get("k") is None

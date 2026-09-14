@@ -33,7 +33,9 @@ class TestStrictness:
         no way to discover why.
         """
         with pytest.raises(ValidationError) as exc_info:
-            ClassificationOptions(top_k=5, tpo_k=10)
+            # The typo is deliberate; mypy flags it, which is the behaviour
+            # under test at runtime too.
+            ClassificationOptions(top_k=5, tpo_k=10)  # type: ignore[call-arg]
 
         assert "tpo_k" in str(exc_info.value)
 

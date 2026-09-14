@@ -15,4 +15,7 @@ else
     uv run ruff format --check .
 fi
 
-uv run mypy api models worker scripts
+# tests are type-checked too. They are code, and a bug in a test is a bug --
+# the `tests.*` override below relaxes the untyped-def rule for fixtures
+# without exempting them from checking altogether.
+uv run mypy api models worker scripts tests
