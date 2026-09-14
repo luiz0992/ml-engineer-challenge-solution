@@ -50,9 +50,10 @@ Reuse costs one extra export and no additional training. A separate CLIP model
 would give better open-domain similarity at the cost of a third set of weights,
 a second preprocessing pipeline, and a model that has never seen this data.
 
-Measured precision@5 is 92% across five query classes, at ~5 ms per query over
-20,000 indexed images. Quality varies sharply by class — distinctive categories
-returned 5/5 at similarity 0.72-0.84, an ambiguous one returned 3/5 at 0.45.
+Measured precision@5 is **79.7%** over 1,000 validation queries spanning all 200
+classes, at ~5 ms per query against 20,000 indexed images. Quality varies
+sharply by class (19.2pp standard deviation); see section 8, which also records
+why an earlier 92% figure in this document was wrong.
 
 ---
 
@@ -308,6 +309,27 @@ earliest available warning.
 
 ### A/B testing
 
+Wired into the serving path. An experiment file declares how traffic splits
+across model versions; the classification endpoint resolves each caller to a
+version before inference, and the assigned variant is written to the audit
+trail so the arms can be compared afterwards. An experiment that produces
+traffic but no analysable result is useless.
+
+Three safety properties, all asserted by tests:
+
+* **An explicit `model_version` always beats an experiment.** A caller asking
+  for a specific version and silently receiving another makes the versioning
+  contract a lie.
+* **A variant naming an unloaded version disables the whole experiment.**
+  Otherwise that share of traffic 404s, which is worse than running no
+  experiment.
+* **A malformed config never fails a request.** Bad JSON, weights that do not
+  sum to one, missing fields — all drop the experiment with a loud log and send
+  traffic to the active version.
+
+Verified end to end: 60 users split 32/28 across two loaded versions, with every
+audit row carrying the correct variant/version pair.
+
 **Assignment is deterministic per user**, by hashing `experiment + user_id`. A
 user stays on the arm they were assigned. Random per-request assignment would
 give the same caller different versions for identical inputs, and would
@@ -344,20 +366,175 @@ what a gate is for.
 
 ---
 
-## 8. What is missing, and why
+## 8. Measured model quality
 
-Stated plainly rather than omitted.
+`scripts/evaluate_models.py` produces the numbers that aggregate accuracy
+hides. Two of them changed what the model cards claim.
+
+### Per-class accuracy
+
+Mean 85.8% across 200 classes, standard deviation 8.6pp, range 56%–100%, and
+**no class below 50%**. That last point is the one worth checking: a 200-class
+model can average 86% while being useless for a handful of categories. The
+weakest are `umbrella` (56%), `pole` (58%), `syringe` (58%), and `Egyptian cat`
+(60%) — the last being confusion with `tabby`, a genuinely fine-grained
+distinction rather than a model failure.
+
+### Calibration
+
+ECE 0.0852, and the model is **systematically underconfident**: it reports
+77.3% mean confidence while being right 85.8% of the time, with a positive gap
+in every single confidence bin. This is the expected consequence of label
+smoothing and MixUp.
+
+Underconfidence is the safe direction, but it is not free: a caller
+thresholding at 0.9 to select "high confidence" predictions discards a large
+number that are correct 96% of the time. The correct threshold for a 95%
+precision operating point is around **0.75**.
+
+### A correction to a number I published
+
+The embedder model card originally reported **92% precision@5**. That came from
+five hand-picked classes. Measured properly — 1,000 validation queries across
+all 200 classes — the real figure is **79.7%**.
+
+Per-class variation is also far wider than the classifier's: 19.2pp standard
+deviation against 8.6pp. Categories defined by *context* rather than appearance
+retrieve very poorly (`pole` 10%, `bannister` 13%), because the embedding
+captures overall scene composition and those objects rarely dominate a frame.
+
+The correction is recorded in the model card rather than quietly fixed. A
+cherry-picked benchmark that flatters the model is exactly the kind of number
+that should not be trusted — including when it is your own.
+
+---
+
+## 9. Detector accuracy, measured
+
+`scripts/evaluate_detector.py` evaluates on COCO val2017 with `pycocotools` —
+the reference implementation, not a reimplementation. Detection mAP has enough
+subtleties (IoU thresholds, area ranges, 101-point interpolated precision,
+crowd handling) that a hand-rolled version is far likelier to be subtly wrong
+than useful.
+
+| Metric | Measured |
+| --- | ---: |
+| **mAP@[.5:.95]** | **0.500** |
+| mAP@0.5 | 0.667 |
+| mAP small / medium / large | 0.347 / 0.516 / 0.627 |
+
+The small-versus-large gap of 0.280 is the
+model's real weakness, now quantified rather than asserted.
+
+Two details would have silently corrupted this. COCO's 80 categories carry
+**non-contiguous IDs from 1 to 90** while the model emits a dense 0–79 index;
+submitting the index as a category ID scores almost everything as a mismatch
+and yields a plausible near-zero mAP. And COCO expects boxes as
+`[x, y, width, height]` while the API returns corners, because that is what
+clients overlay — submitting corners silently halves apparent box sizes.
+
+The evaluation threshold is 0.01, not the serving default of 0.5. mAP
+integrates precision over the full recall curve, so discarding low-scoring
+detections truncates it and understates the score.
+
+---
+
+## 10. Guarding against recurrence
+
+Two defects proved able to reappear each time a new call site was added. Both
+share a shape — **code that succeeds while doing nothing** — which is the
+hardest class to notice, because everything looks healthy. Neither is now
+prevented by a comment asking future contributors to remember.
+
+### A session that works and cannot infer
+
+ONNX Runtime resolves cuDNN lazily at the first kernel launch. A session
+requesting `CUDAExecutionProvider` is created successfully, reports the
+provider it was asked for, and then fails *every* inference with
+`NOT_IMPLEMENTED`. TensorRT fails differently but equally quietly, falling back
+to CPU without raising.
+
+This recurred **three times**: in the model service, the benchmark harness, and
+the evaluation scripts. Each new call site had to remember to preload.
+
+`api.services.runtime.create_session` now owns session construction — it
+preloads the libraries and asserts the provider actually took effect — and
+`tests/unit/test_invariants.py` fails the build if any module constructs a GPU
+session directly. The model service's warmup inference remains the backstop
+that proves a backend executes.
+
+### An alert that can never fire
+
+`AuditDefaultPartitionNonEmpty` was written against
+`inference_logs_default_partition_rows`, which nothing exported. It would have
+sat permanently green. **That is worse than having no alert**, because it looks
+like coverage and stops anyone asking whether the condition is monitored.
+
+A test now parses every rule in `alerts.yml`, extracts the metrics it
+references, and fails if none is exported anywhere in the codebase.
+
+### Verifying the guards actually fail
+
+Both were confirmed by deliberately introducing a violation — a direct GPU
+session, and an alert on a fabricated metric — and checking the tests failed.
+A guard that cannot fail is the same category of defect it exists to prevent,
+which is precisely the lesson from the `fakeredis` incident in section 5.
+
+---
+
+## 11. Deployment
+
+`deploy/kubernetes/` contains manifests with a HorizontalPodAutoscaler, because
+autoscaling is not a property Compose can demonstrate and claiming it there
+would be misleading.
+
+**The scaling signal is the interesting decision.** The HPA targets
+`http_requests_in_progress` per pod, not CPU. CPU is the obvious choice and the
+wrong one: inference saturates the GPU, or the thread pool that ONNX Runtime's
+blocking `Run()` occupies, well before CPU utilisation looks high. A
+CPU-targeted autoscaler therefore scales *after* latency has already degraded —
+it measures a resource that is not the bottleneck. CPU is retained as a
+secondary guard at 80%, which catches a genuinely CPU-bound regression such as
+a silent fallback to the CPU execution provider.
+
+Scale-down is deliberately slow (one pod per minute, five-minute stabilisation):
+each terminating pod discards its in-memory model and the next pays the
+load-and-warm cost again, so aggressive scale-down produces thrash that looks
+like instability.
+
+The `Deployment` declares no `replicas`, because setting it alongside an HPA
+means every `kubectl apply` resets the count and undoes the autoscaler's
+decision. A `PodDisruptionBudget` prevents a node drain from evicting every
+replica during routine maintenance.
+
+Scheduled work runs as `CronJob`s rather than the sleeping containers Compose
+requires. A `while true; sleep` loop has no run history, no retry policy, and
+nothing to alert on — and silently stops working if the process dies in a way
+`restart` does not catch.
+
+Alertmanager routing is configured in `monitoring/alertmanager/`. The routing
+tree encodes one judgement worth stating: **model-quality alerts are not
+paged**. Drift is not an incident; it is a signal that the model's assumptions
+are expiring, and the correct response is an investigation during working
+hours. Paging on it is the fastest way to get drift alerts muted permanently.
+Inhibit rules suppress the cascade of latency and error-rate alerts that a
+single outage otherwise produces, so the one line saying what actually happened
+is not buried.
+
+Delivery endpoints are commented out. Alertmanager performs no environment
+substitution, so a config referencing an unset `${SLACK_WEBHOOK_URL}` fails to
+load entirely — taking the container down for a channel nobody configured
+locally. The routing, grouping, and inhibit logic are fully active and
+inspectable; adding delivery is uncommenting a block and supplying an endpoint.
+
+---
+
+## 12. What is still missing
 
 | Gap | Reason |
 | --- | --- |
-| Detector evaluation | Published COCO mAP is quoted; no independent evaluation run |
-| Calibration and per-class metrics | Only aggregate accuracy measured |
-| Similarity precision@5 across all classes | Measured on 5 of 200; per-class variation is demonstrably large |
-| GPU in containers | Compose runs ONNX Runtime on CPU (~170 ms); GPU passthrough needs device reservations and `onnxruntime-gpu` |
-| Postgres partitioning and retention | Needed before sustained production write volume |
-| Live A/B traffic splitting in the API | The framework and analysis exist; the serving path does not yet route by variant |
-| Automated drift alerting | `scripts/analyse_drift.py` runs on demand; no scheduled job or alert wiring |
+| Detector accuracy off-distribution | Measured on COCO, which is what it was trained for. Behaviour on other cameras, domains, or image quality is unknown. |
+| Alert delivery endpoints | Routing is configured; the webhook and PagerDuty keys are deployment-specific and belong in a secret manager. |
+| Kubernetes manifests are unvalidated against a live cluster | They are syntactically valid and encode the right decisions, but have not been applied to a running cluster. |
 
-The last two are the natural next step: the assignment logic, the audit schema,
-and the comparison statistics all exist, and wiring them into the request path
-plus a scheduled job is integration work rather than new design.
+Everything else previously listed has been implemented and measured.

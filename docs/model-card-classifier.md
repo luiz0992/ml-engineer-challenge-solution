@@ -55,6 +55,59 @@ which carry irreducible entropy — a perfectly calibrated model cannot drive it
 to zero. Validation loss is measured against clean labels. The gap is evidence
 the regularisers are active, not of a bug.
 
+### Per-class accuracy
+
+Measured over the full validation split. The aggregate hides real variation.
+
+| | |
+| --- | --- |
+| Mean per-class accuracy | 85.8% |
+| Standard deviation | 8.6 percentage points |
+| Range | 56% – 100% |
+| **Classes below 50%** | **0** |
+
+| Weakest classes | Accuracy |
+| --- | ---: |
+| umbrella | 56.0% |
+| pole | 58.0% |
+| syringe | 58.0% |
+| Egyptian cat | 60.0% |
+| plate | 64.0% |
+
+No class collapses, which is the important property — a 200-class model can
+average 86% while being useless for a handful of categories. `Egyptian cat` is
+instructive: it is confused with `tabby`, a genuinely fine-grained distinction
+rather than a failure of the model.
+
+### Calibration
+
+| Metric | Value |
+| --- | --- |
+| Expected Calibration Error | **0.0852** |
+| Mean confidence | 0.773 |
+| Mean accuracy | 0.858 |
+| Direction | **Underconfident by 0.085** |
+
+The model is **systematically underconfident**: it reports 77.3% average
+confidence while being right 85.8% of the time, and the gap is positive in
+every single confidence bin.
+
+| Confidence bin | n | Mean confidence | Actual accuracy | Gap |
+| --- | ---: | ---: | ---: | ---: |
+| 0.5–0.6 | 590 | 0.549 | 0.673 | +0.124 |
+| 0.6–0.7 | 678 | 0.654 | 0.791 | +0.136 |
+| 0.7–0.8 | 961 | 0.755 | 0.898 | +0.143 |
+| 0.8–0.9 | 1,989 | 0.860 | 0.963 | +0.103 |
+| 0.9–1.0 | 4,236 | 0.944 | 0.993 | +0.049 |
+
+This is the expected consequence of label smoothing (0.1) and MixUp, which
+deliberately prevent the model from placing full probability mass on one class.
+
+**Underconfidence is the safe direction**, but it is not harmless: a caller
+thresholding at 0.9 to filter for "high confidence" predictions discards a
+large number of results that are correct 96% of the time. A caller wanting a
+95% precision operating point should threshold around **0.75**, not 0.95.
+
 ### Serving-path accuracy
 
 The production API reimplements preprocessing in NumPy so the serving container
@@ -113,13 +166,15 @@ out-of-distribution detection. **This is the most likely way the model fails in
 practice**, and any caller should treat predictions as valid only for inputs
 known to belong to the 200 categories.
 
-**Calibration is unmeasured.** Label smoothing and MixUp generally improve
-calibration, but no reliability diagram or ECE was computed. Probabilities
-should not be interpreted as well-calibrated confidence.
+**Probabilities are systematically underconfident** (ECE 0.085). They are
+usable for ranking, and conservative as a confidence signal, but a caller
+thresholding at a nominal probability gets better precision than the number
+suggests. See the calibration table above for the correct operating points.
 
-**Per-class performance is unmeasured.** Only aggregate accuracy was recorded.
-Some of the 200 classes are certainly much worse than 85.88%, and fine-grained
-distinctions (breeds, species) are likely the weakest.
+**Per-class performance varies by 8.6 percentage points** (56%–100%). No class
+falls below 50%, but a caller relying on the aggregate for a specific weak
+category — `umbrella`, `pole`, `syringe` — will be disappointed. See the
+per-class table above.
 
 **Robustness is untested.** No evaluation against corruption, compression
 artefacts, adversarial perturbation, or distribution shift.

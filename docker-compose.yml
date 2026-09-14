@@ -206,7 +206,98 @@ services:
     networks: [backend]
     logging: *default-logging
 
+  # --- Scheduled maintenance -----------------------------------------------
+  # Creates upcoming partitions and drops expired ones, then sleeps a day.
+  #
+  # A loop in a container rather than host cron, so the schedule ships with the
+  # stack and cannot be forgotten when the service moves machines. In a real
+  # deployment this belongs in the orchestrator's scheduler (a Kubernetes
+  # CronJob), which gives retries, history, and alerting on failure -- a
+  # sleeping container silently stops doing its job if it dies and `restart`
+  # does not catch it.
+  #
+  # The partition job must stay ahead of inserts: rows arriving with no matching
+  # partition land in the DEFAULT partition, which retention will never drop.
+  maintenance:
+    image: mlchal-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    container_name: mlchal-maintenance
+    environment: *api-env
+    # These reuse the API image and therefore inherit its HEALTHCHECK, which
+    # probes an HTTP port they do not serve -- leaving them permanently
+    # unhealthy and, worse, making a genuinely broken job indistinguishable
+    # from a working one. A sleeping scheduler has no meaningful readiness
+    # signal; its health is whether its runs succeed, which is what the pushed
+    # metrics report.
+    healthcheck:
+      disable: true
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          python -m scripts.maintain_partitions --push-metrics \
+            || echo "[maintenance] failed; will retry tomorrow"
+          sleep 86400
+        done
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks: [backend, monitoring]
+    logging: *default-logging
+
+  # --- Drift analysis --------------------------------------------------------
+  # Runs daily and pushes results to Prometheus, so drift alerts route through
+  # the same rules and on-call rotation as everything else. A scheduled job
+  # that only writes to stdout is not alerting -- nobody reads a container log
+  # on a schedule.
+  drift:
+    image: mlchal-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    container_name: mlchal-drift
+    environment: *api-env
+    # These reuse the API image and therefore inherit its HEALTHCHECK, which
+    # probes an HTTP port they do not serve -- leaving them permanently
+    # unhealthy and, worse, making a genuinely broken job indistinguishable
+    # from a working one. A sleeping scheduler has no meaningful readiness
+    # signal; its health is whether its runs succeed, which is what the pushed
+    # metrics report.
+    healthcheck:
+      disable: true
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          echo "[drift] $$(date -Iseconds) analysing"
+          python -m scripts.analyse_drift \
+            --baseline-days 7 --current-days 1 \
+            --push-metrics --pushgateway pushgateway:9091 \
+            || echo "[drift] analysis failed; will retry tomorrow"
+          sleep 86400
+        done
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks: [backend, monitoring]
+    logging: *default-logging
+
   # --- Monitoring ----------------------------------------------------------
+  # Batch jobs exit, so there is nothing for Prometheus to scrape. They push
+  # here instead.
+  pushgateway:
+    image: prom/pushgateway:v1.11.0
+    container_name: mlchal-pushgateway
+    restart: unless-stopped
+    networks: [backend, monitoring]
+    logging: *default-logging
+
   prometheus:
     image: prom/prometheus:v3.1.0
     container_name: mlchal-prometheus
@@ -230,6 +321,24 @@ services:
       retries: 3
     restart: unless-stopped
     networks: [backend, monitoring]
+    logging: *default-logging
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    container_name: mlchal-alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./monitoring/alertmanager:/etc/alertmanager:ro
+      - alertmanager-data:/alertmanager
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:9093/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks: [monitoring]
     logging: *default-logging
 
   grafana:
@@ -264,6 +373,7 @@ networks:
     driver: bridge
 
 volumes:
+  alertmanager-data:
   postgres-data:
   redis-data:
   prometheus-data:

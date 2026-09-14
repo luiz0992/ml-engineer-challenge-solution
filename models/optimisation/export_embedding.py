@@ -284,3 +284,157 @@ def build_index(
         metadata.index_type,
     )
     return metadata
+
+
+def append_to_index(
+    artifacts_dir: Path,
+    embeddings: np.ndarray,
+    labels: list[int],
+    paths: list[str],
+) -> IndexMetadata:
+    """Add vectors to an existing index without rebuilding it.
+
+    ``IndexFlatIP`` supports incremental ``add``, so new images cost only their
+    own embedding time rather than a full re-embed of the corpus. This is the
+    difference between adding a hundred images in seconds and re-running a
+    twenty-minute job.
+
+    The manifest is extended in the same order, because FAISS assigns row
+    numbers sequentially and any divergence between index position and manifest
+    position silently mislabels every result after the first mismatch. The two
+    are written together and their lengths are checked afterwards.
+
+    An approximate index (IVF, HNSW) would need retraining as the distribution
+    shifts, which is one more reason exact search is the right default until
+    the corpus is large enough to require otherwise.
+    """
+    import faiss
+
+    index_path = artifacts_dir / "similarity.index"
+    manifest_path = artifacts_dir / "similarity_manifest.json"
+
+    if not index_path.exists():
+        raise FileNotFoundError(
+            f"No index at {index_path}. Build one first with scripts/build_similarity_index.py."
+        )
+
+    if embeddings.dtype != np.float32:
+        embeddings = embeddings.astype(np.float32)
+    embeddings = np.ascontiguousarray(embeddings)
+
+    norms = np.linalg.norm(embeddings, axis=-1)
+    if not np.allclose(norms, 1.0, atol=1e-3):
+        raise ValueError(
+            "New embeddings are not unit-norm; inner product would no longer "
+            "equal cosine similarity for these rows only, making their scores "
+            "incomparable with the rest of the index."
+        )
+
+    index = faiss.read_index(str(index_path))
+    if index.d != embeddings.shape[1]:
+        raise ValueError(
+            f"Index has dimension {index.d} but the new embeddings have "
+            f"{embeddings.shape[1]}. They come from a different model."
+        )
+
+    manifest = json.loads(manifest_path.read_text())
+
+    before = int(index.ntotal)
+    index.add(embeddings)
+    manifest["labels"].extend(labels)
+    manifest["paths"].extend(paths)
+
+    if index.ntotal != len(manifest["labels"]):
+        raise RuntimeError(
+            f"Index and manifest diverged: {index.ntotal} vectors against "
+            f"{len(manifest['labels'])} entries. Neither has been written."
+        )
+
+    # Written only after the consistency check, so a failure leaves the
+    # existing index and manifest intact rather than half-updated.
+    faiss.write_index(index, str(index_path))
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    metadata_path = artifacts_dir / "similarity_metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["num_vectors"] = int(index.ntotal)
+    metadata_path.write_text(json.dumps(metadata, indent=2))
+
+    logger.info(
+        "Appended %d vectors to the index (%d -> %d)",
+        len(labels),
+        before,
+        index.ntotal,
+    )
+    return IndexMetadata(
+        num_vectors=int(index.ntotal),
+        embedding_dim=int(index.d),
+        metric=metadata["metric"],
+        source_model=metadata["source_model"],
+        image_size=metadata["image_size"],
+        index_type=metadata["index_type"],
+    )
+
+
+def update_index_labels(
+    artifacts_dir: Path,
+    updates: dict[int, int],
+    *,
+    path_updates: dict[int, str] | None = None,
+) -> int:
+    """Change the labels of indexed vectors without rebuilding the index.
+
+    The FAISS index stores only vectors; labels and paths live in the manifest
+    beside it. Relabelling is therefore a manifest edit and needs no re-embedding
+    at all — a distinction worth making explicit, because "the index must be
+    rebuilt to change a label" was previously stated as a limitation and is
+    simply not true.
+
+    ``updates`` maps row number to new class index. Rows are validated against
+    the index size first: a row number beyond the end would extend the manifest
+    and silently desynchronise it from the index, mislabelling every result
+    after that point.
+
+    Returns the number of rows changed.
+    """
+    import faiss
+
+    index_path = artifacts_dir / "similarity.index"
+    manifest_path = artifacts_dir / "similarity_manifest.json"
+
+    if not index_path.exists() or not manifest_path.exists():
+        raise FileNotFoundError(f"No index or manifest in {artifacts_dir}")
+
+    index = faiss.read_index(str(index_path))
+    manifest = json.loads(manifest_path.read_text())
+
+    size = int(index.ntotal)
+    out_of_range = [row for row in {**updates, **(path_updates or {})} if not 0 <= row < size]
+    if out_of_range:
+        raise IndexError(
+            f"Row numbers outside the index (size {size}): {sorted(out_of_range)[:10]}. "
+            f"Writing them would desynchronise the manifest from the index and "
+            f"mislabel every subsequent result."
+        )
+
+    changed = 0
+    for row, label in updates.items():
+        if manifest["labels"][row] != label:
+            manifest["labels"][row] = label
+            changed += 1
+
+    for row, path in (path_updates or {}).items():
+        if manifest["paths"][row] != path:
+            manifest["paths"][row] = path
+            changed += 1
+
+    if len(manifest["labels"]) != size or len(manifest["paths"]) != size:
+        raise RuntimeError(
+            f"Manifest length ({len(manifest['labels'])} labels, "
+            f"{len(manifest['paths'])} paths) does not match the index ({size}). "
+            f"Nothing has been written."
+        )
+
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    logger.info("Updated %d manifest entries (no re-embedding required)", changed)
+    return changed

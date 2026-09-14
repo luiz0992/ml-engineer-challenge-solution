@@ -63,6 +63,9 @@ class LatencyResult:
 
     iterations: int
     warmup: int
+    #: Which model produced this measurement. Benchmarks now cover three, and a
+    #: table mixing them without this column would be meaningless.
+    model: str = "classifier"
     model_size_mb: float | None = None
     accuracy_top1: float | None = None
     notes: str = ""
@@ -351,6 +354,17 @@ def benchmark_onnx(
         # Engine building is slow; a longer warmup absorbs it.
         warmup = max(warmup, 5)
 
+    # Provider options (the TensorRT engine cache) cannot go through the shared
+    # helper's simple provider list, so the session is built here -- but the
+    # preload and the provider assertion are still applied, because measuring
+    # the wrong backend is exactly the failure this harness exists to avoid.
+    from api.services.runtime import preload_cuda_libraries, preload_tensorrt_libraries
+
+    if provider == "TensorrtExecutionProvider":
+        preload_tensorrt_libraries()
+    elif provider != "CPUExecutionProvider":
+        preload_cuda_libraries()
+
     session_options = ort.SessionOptions()
     session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
@@ -437,11 +451,17 @@ def format_markdown_report(
     # Matched on backend *and* precision. Matching on backend alone lets the
     # bf16 or compiled row overwrite the fp32 entry, silently rebasing every
     # speedup in the table against whichever configuration happened to run last.
+    # Keyed by (model, batch): a speedup comparing a detector against a
+    # classifier baseline would be meaningless.
     baselines = {
-        r.batch_size: r.mean_ms
+        (r.model, r.batch_size): r.mean_ms
         for r in report.results
         if r.backend == baseline_backend and r.precision == baseline_precision
     }
+
+    by_model: dict[str, list[LatencyResult]] = {}
+    for result in report.results:
+        by_model.setdefault(result.model, []).append(result)
 
     lines += [
         "",
@@ -451,17 +471,19 @@ def format_markdown_report(
         f"the clock. Speedup is relative to `{baseline_backend}` "
         f"({baseline_precision}) at the same batch size.",
         "",
-        "| Backend | Precision | Batch | Mean (ms) | p50 | p95 | p99 | Std | "
+        "| Model | Backend | Precision | Batch | Mean (ms) | p50 | p95 | p99 | Std | "
         "Throughput (img/s) | Per-image (ms) | Speedup | Size (MB) |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
 
-    for r in sorted(report.results, key=lambda x: (x.batch_size, x.mean_ms)):
-        base = baselines.get(r.batch_size)
+    for r in sorted(
+        report.results, key=lambda x: (x.model != "classifier", x.model, x.batch_size, x.mean_ms)
+    ):
+        base = baselines.get((r.model, r.batch_size))
         speedup = f"{base / r.mean_ms:.2f}x" if base else "-"
         size = f"{r.model_size_mb:.1f}" if r.model_size_mb is not None else "-"
         lines.append(
-            f"| {r.backend} | {r.precision} | {r.batch_size} | {r.mean_ms:.2f} | "
+            f"| {r.model} | {r.backend} | {r.precision} | {r.batch_size} | {r.mean_ms:.2f} | "
             f"{r.p50_ms:.2f} | {r.p95_ms:.2f} | {r.p99_ms:.2f} | {r.std_ms:.2f} | "
             f"{r.throughput_ips:.1f} | {r.per_image_ms:.2f} | {speedup} | {size} |"
         )

@@ -48,7 +48,76 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Exit non-zero when significant drift is detected, for use in a scheduled job",
     )
+    parser.add_argument(
+        "--push-metrics",
+        action="store_true",
+        help=(
+            "Publish results to the Prometheus pushgateway, so drift alerts route "
+            "through the same path as every other alert"
+        ),
+    )
+    parser.add_argument(
+        "--pushgateway",
+        default="pushgateway:9091",
+        help="Prometheus pushgateway address",
+    )
     return parser
+
+
+def push_drift_metrics(report: Any, gateway: str) -> None:
+    """Publish drift severity to Prometheus.
+
+    A scheduled job that only writes to stdout is not alerting -- nobody reads
+    a container log on a schedule. Pushing to the gateway means drift is
+    alertable through exactly the same rules, routing, and on-call rotation as
+    every other signal, rather than needing its own notification path.
+
+    The pushgateway (rather than a scrape endpoint) is the right primitive
+    here: this is a batch job that exits, so there is nothing for Prometheus to
+    scrape.
+    """
+    from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
+
+    severity_values = {
+        "none": 0.0,
+        "insufficient_data": 0.0,
+        "moderate": 1.0,
+        "significant": 2.0,
+    }
+
+    registry = CollectorRegistry()
+
+    overall = Gauge(
+        "model_drift_severity",
+        "Drift severity: 0 none, 1 moderate, 2 significant.",
+        ["model", "version"],
+        registry=registry,
+    )
+    overall.labels(
+        model=report.model_name or "unknown", version=report.model_version or "unknown"
+    ).set(severity_values.get(report.overall_severity.value, 0.0))
+
+    per_feature = Gauge(
+        "model_drift_statistic",
+        "Per-feature drift statistic (PSI or KS).",
+        ["model", "version", "feature", "method"],
+        registry=registry,
+    )
+    for result in report.results:
+        per_feature.labels(
+            model=report.model_name or "unknown",
+            version=report.model_version or "unknown",
+            feature=result.feature,
+            method=result.method,
+        ).set(result.statistic)
+
+    try:
+        push_to_gateway(gateway, job="model_drift", registry=registry)
+        logger.info("Pushed drift metrics to %s", gateway)
+    except Exception as exc:
+        # A monitoring failure must not fail the job, or a pushgateway outage
+        # looks identical to detected drift.
+        logger.warning("Could not push metrics to %s: %s", gateway, exc)
 
 
 async def fetch_window(
@@ -134,6 +203,9 @@ async def run(args: argparse.Namespace) -> int:
         print(json.dumps(report.as_dict(), indent=2))
     else:
         _print_table(report)
+
+    if args.push_metrics:
+        push_drift_metrics(report, args.pushgateway)
 
     if args.fail_on_drift and report.overall_severity is DriftSeverity.SIGNIFICANT:
         logger.error("Significant drift detected")

@@ -15,6 +15,7 @@ from api.exceptions import ModelUnavailableError, ServiceUnavailableError
 from api.middleware.rate_limit import RateLimiter
 from api.services.cache_service import CacheService
 from api.services.detection_service import DetectionService
+from api.services.experiment_service import ExperimentRegistry
 from api.services.inference_service import InferenceService
 from api.services.model_service import ModelService
 from api.services.similarity_service import SimilarityService
@@ -67,6 +68,16 @@ def get_similarity_service(request: Request) -> SimilarityService:
             "index with `python scripts/build_similarity_index.py`."
         )
     return service
+
+
+def get_experiment_registry(request: Request) -> ExperimentRegistry:
+    """Return the experiment registry.
+
+    Falls back to an empty registry rather than raising: no experiments is the
+    normal state, and an experiment problem must never fail a request.
+    """
+    registry = getattr(request.app.state, "experiment_registry", None)
+    return registry if registry is not None else ExperimentRegistry.empty()
 
 
 def get_rate_limiter(request: Request) -> RateLimiter:

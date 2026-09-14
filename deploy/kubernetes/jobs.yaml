@@ -1,0 +1,112 @@
+# Scheduled jobs.
+#
+# These run as CronJobs rather than sleeping containers. A `while true; sleep`
+# loop is what the Compose stack uses because Compose has no scheduler, but it
+# has two failure modes a CronJob does not: if the process dies in a way that
+# `restart` does not catch, it silently stops working; and there is no history,
+# no retry policy, and nothing to alert on when a run fails.
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: audit-maintenance
+  namespace: ml-api
+spec:
+  # Daily, before the drift job, so partitions exist for any rows it reads.
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  # Do not run a backlog of missed schedules after an outage; one run is enough
+  # to catch up, and ten simultaneous DDL jobs would contend on the same table.
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+          containers:
+            - name: maintenance
+              image: mlchal-api:latest
+              envFrom:
+                - configMapRef:
+                    name: ml-api-config
+                - secretRef:
+                    name: ml-api-secrets
+              command: ["python", "-m", "scripts.maintain_partitions", "--push-metrics"]
+              resources:
+                requests: {cpu: "100m", memory: "256Mi"}
+                limits: {cpu: "500m", memory: "512Mi"}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: drift-analysis
+  namespace: ml-api
+spec:
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+          containers:
+            - name: drift
+              image: mlchal-api:latest
+              envFrom:
+                - configMapRef:
+                    name: ml-api-config
+                - secretRef:
+                    name: ml-api-secrets
+              command:
+                - python
+                - -m
+                - scripts.analyse_drift
+                - --baseline-days=7
+                - --current-days=1
+                - --push-metrics
+                - --pushgateway=pushgateway:9091
+              resources:
+                requests: {cpu: "200m", memory: "512Mi"}
+                limits: {cpu: "1", memory: "2Gi"}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  namespace: ml-api
+  annotations:
+    # Run before the application on every deploy, and block the rollout until
+    # it succeeds. Migrating from the API's entrypoint means N replicas race to
+    # apply the same DDL.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+        - name: migrate
+          image: mlchal-api:latest
+          envFrom:
+            - configMapRef:
+                name: ml-api-config
+            - secretRef:
+                name: ml-api-secrets
+          command: ["alembic", "upgrade", "head"]

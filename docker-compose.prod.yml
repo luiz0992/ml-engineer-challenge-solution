@@ -78,6 +78,18 @@ services:
     deploy:
       # Several replicas behind the gateway. The application holds no
       # per-request state, so scaling out needs no coordination.
+      #
+      # Compose has no autoscaler: `replicas` is a fixed count, and scaling is
+      # `docker compose up --scale ml-api=N` or a redeploy. That is a real
+      # limitation and the reason this overlay is a demonstration of the
+      # production *shape* rather than a production deployment.
+      #
+      # On Kubernetes this becomes a HorizontalPodAutoscaler. The right signal
+      # is not CPU: inference saturates the GPU or the thread pool well before
+      # CPU looks busy, so a CPU-based autoscaler consistently scales too late.
+      # Scale on `http_requests_in_progress` per replica, which is already
+      # exported, or on p95 latency from the histogram -- both measure the
+      # queue the user actually waits in.
       replicas: ${API_REPLICAS:-3}
       resources:
         limits:

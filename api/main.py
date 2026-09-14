@@ -46,6 +46,7 @@ from api.routers import auth, batch, classification, detection, health, similari
 from api.services.audit_service import AuditService
 from api.services.cache_service import CacheService
 from api.services.detection_service import DetectionService
+from api.services.experiment_service import ExperimentRegistry
 from api.services.inference_service import InferenceService
 from api.services.model_service import ModelService
 from api.services.similarity_service import SimilarityIndex, SimilarityService
@@ -249,6 +250,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.audit_service = audit_service
     app.state.inference_service = InferenceService(
         model_service, cache_service, settings, audit_service
+    )
+    # Experiments are resolved against loaded models, so a variant naming an
+    # unloaded version is rejected at startup rather than 404-ing that share of
+    # traffic.
+    available_versions: dict[str, set[str]] = {}
+    for loaded in model_service.list_models():
+        available_versions.setdefault(loaded.name, set()).add(loaded.version)
+
+    app.state.experiment_registry = ExperimentRegistry.load(
+        settings.artifacts_dir / "experiments.json",
+        available_versions=available_versions,
     )
     app.state.detection_service = detection_service
     app.state.similarity_service = similarity_service

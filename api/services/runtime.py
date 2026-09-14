@@ -30,6 +30,7 @@ from __future__ import annotations
 import ctypes
 import importlib.util
 from pathlib import Path
+from typing import Any
 
 from api.logging_config import get_logger
 
@@ -93,3 +94,75 @@ def preload_tensorrt_libraries() -> bool:
     """
     preload_cuda_libraries()
     return _load(_TENSORRT_LIBRARIES, label="tensorrt")
+
+
+# ---------------------------------------------------------------------------
+# Session construction
+# ---------------------------------------------------------------------------
+#: Guards the one-time preload. ctypes.CDLL is idempotent, but the work and the
+#: log line are not worth repeating per session.
+_PRELOADED = False
+
+
+def create_session(
+    model_path: str,
+    *,
+    providers: list[str] | None = None,
+    graph_optimization: bool = True,
+    verify_provider: bool = True,
+) -> tuple[Any, str]:
+    """Create an ONNX Runtime session with GPU libraries already resolved.
+
+    **Every** session in this project must be created through this function
+    rather than by calling ``ort.InferenceSession`` directly, because the
+    failure it prevents is silent in two different ways:
+
+    * **TensorRT** fails at session creation and ONNX Runtime falls back to CPU
+      without raising. The session works; it is simply about a hundred times
+      slower than the caller believes.
+    * **CUDA** resolves cuDNN lazily at the first kernel launch. The session is
+      created successfully, reports the provider it was asked for, and then
+      fails *every* inference with ``NOT_IMPLEMENTED``.
+
+    That second failure recurred three times during development -- in the model
+    service, in the benchmark harness, and in the evaluation scripts -- because
+    each call site had to remember to preload. A shared constructor removes the
+    opportunity to forget. :func:`~api.services.model_service.ModelService._warmup`
+    remains the backstop that proves a backend actually executes.
+
+    Returns ``(session, input_name)``.
+    """
+    global _PRELOADED
+
+    import onnxruntime as ort
+
+    requested = providers or ["CPUExecutionProvider"]
+
+    if not _PRELOADED and any(p != "CPUExecutionProvider" for p in requested):
+        if any("Tensorrt" in p for p in requested):
+            preload_tensorrt_libraries()
+        else:
+            preload_cuda_libraries()
+        _PRELOADED = True
+
+    available = set(ort.get_available_providers())
+    usable = [p for p in requested if p in available]
+    if "CPUExecutionProvider" not in usable:
+        # ONNX Runtime requires a CPU fallback in the provider list.
+        usable.append("CPUExecutionProvider")
+
+    options = ort.SessionOptions()
+    if graph_optimization:
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+    session = ort.InferenceSession(model_path, sess_options=options, providers=usable)
+
+    if verify_provider and usable[0] != "CPUExecutionProvider":
+        selected = session.get_providers()[0]
+        if selected != usable[0]:
+            raise RuntimeError(
+                f"Requested provider {usable[0]} but ONNX Runtime selected "
+                f"{selected}. Refusing to report a backend that is not in use."
+            )
+
+    return session, session.get_inputs()[0].name

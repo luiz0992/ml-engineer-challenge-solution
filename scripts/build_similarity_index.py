@@ -21,6 +21,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -40,6 +41,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Images to index. Sampled evenly across classes.",
     )
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--append",
+        type=Path,
+        default=None,
+        help=(
+            "Directory of images to add to the existing index instead of "
+            "rebuilding. Costs only the new images' embedding time."
+        ),
+    )
+    parser.add_argument(
+        "--append-label",
+        type=int,
+        default=-1,
+        help="Class index for appended images; -1 marks them as unlabelled",
+    )
     return parser
 
 
@@ -69,6 +85,9 @@ def main(argv: list[str] | None = None) -> int:
 
     session = ort.InferenceSession(str(embedder_path), providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
+
+    if args.append is not None:
+        return _append_images(session, input_name, args)
 
     root = resolve_root(args.data_dir)
     train_dir = root / "train"
@@ -110,6 +129,37 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     logger.info("Index ready: %d vectors", metadata.num_vectors)
+    return 0
+
+
+def _append_images(session: Any, input_name: str, args: argparse.Namespace) -> int:
+    """Embed a directory of images and append them to the existing index."""
+    from api.utils.image_processing import PreprocessConfig, preprocess_image, stack_batch
+    from models.optimisation.export_embedding import append_to_index
+
+    files = sorted(
+        p for p in args.append.rglob("*") if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    )
+    if not files:
+        raise SystemExit(f"No images found under {args.append}")
+
+    logger.info("Appending %d images from %s", len(files), args.append)
+
+    config = PreprocessConfig(image_size=224)
+    embeddings = np.empty((len(files), 384), dtype=np.float32)
+
+    for start in range(0, len(files), args.batch_size):
+        chunk = files[start : start + args.batch_size]
+        batch = stack_batch([preprocess_image(p.read_bytes(), config) for p in chunk])
+        embeddings[start : start + len(chunk)] = session.run(None, {input_name: batch})[0]
+
+    metadata = append_to_index(
+        args.artifacts_dir,
+        embeddings,
+        labels=[args.append_label] * len(files),
+        paths=[str(p) for p in files],
+    )
+    logger.info("Index now holds %d vectors", metadata.num_vectors)
     return 0
 
 

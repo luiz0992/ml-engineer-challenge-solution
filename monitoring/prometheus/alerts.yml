@@ -102,3 +102,51 @@ groups:
           description: >-
             The service is accepting faster than it can serve. Scale out the
             API, or check whether inference has fallen back to CPU.
+
+  - name: model_quality
+    rules:
+      - alert: ModelDriftSignificant
+        expr: model_drift_severity >= 2
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Significant drift on {{ $labels.model }}:{{ $labels.version }}"
+          description: >-
+            Live traffic has moved materially away from the baseline window.
+            Run `scripts/analyse_drift.py` to see which features moved, then
+            decide whether the change is expected (a new client, a seasonal
+            shift) or whether the model needs retraining. Drift is not itself
+            an incident -- it is a signal that the model's assumptions are
+            expiring.
+        # `for: 1h` because the drift job runs daily and a single reading is
+        # not a trend. This suppresses a one-off spike from an unusual day.
+
+      - alert: ModelDriftJobStale
+        expr: >-
+          time() - max(push_time_seconds{job="model_drift"}) > 172800
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The drift analysis job has not reported in 48 hours"
+          description: >-
+            No drift metrics have been pushed. The job is scheduled daily, so
+            this means it is failing or not running -- and a monitoring job
+            that silently stops is worse than none, because its absence looks
+            exactly like "no drift".
+
+      - alert: AuditDefaultPartitionNonEmpty
+        expr: inference_logs_default_partition_rows > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rows are landing in the audit DEFAULT partition"
+          description: >-
+            Inserts are arriving with timestamps outside every declared
+            partition range, which means partition creation has fallen behind.
+            Retention never drops the DEFAULT partition, so these rows
+            accumulate indefinitely. Run
+            `SELECT * FROM create_inference_log_partitions(3)` and check the
+            maintenance service.

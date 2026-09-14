@@ -1,0 +1,19 @@
+{
+  "num_images": 1000,
+  "num_detections": 250166,
+  "score_threshold": 0.01,
+  "metrics": {
+    "mAP@[.5:.95]": 0.4999,
+    "mAP@0.5": 0.6674,
+    "mAP@0.75": 0.5386,
+    "mAP_small": 0.3469,
+    "mAP_medium": 0.5163,
+    "mAP_large": 0.6271,
+    "AR@1": 0.3772,
+    "AR@10": 0.6291,
+    "AR@100": 0.6859,
+    "AR_small": 0.5005,
+    "AR_medium": 0.7018,
+    "AR_large": 0.8197
+  }
+}

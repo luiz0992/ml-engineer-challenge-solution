@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
 
 from api.dependencies import (
     get_correlation_id,
+    get_experiment_registry,
     get_inference_service,
     get_rate_limiter,
 )
@@ -16,6 +17,7 @@ from api.middleware.auth import Principal, authenticate
 from api.middleware.monitoring import record_inference
 from api.middleware.rate_limit import RateLimiter
 from api.models.responses import ClassificationResponse, ErrorResponse
+from api.services.experiment_service import ExperimentRegistry
 from api.services.inference_service import InferenceService
 
 router = APIRouter(prefix="/classify", tags=["classification"])
@@ -46,6 +48,7 @@ async def classify_image(
     principal: Principal = Depends(authenticate),
     inference: InferenceService = Depends(get_inference_service),
     limiter: RateLimiter = Depends(get_rate_limiter),
+    experiments: ExperimentRegistry = Depends(get_experiment_registry),
     correlation_id: str = Depends(get_correlation_id),
 ) -> ClassificationResponse:
     """Classify a single image and return ranked predictions.
@@ -57,6 +60,14 @@ async def classify_image(
     # Returned on success as well as rejection, so clients can self-throttle
     # before they are rejected rather than discovering the limit by hitting it.
     http_response.headers.update(decision.headers)
+
+    # An explicitly pinned version always wins over an experiment: a caller
+    # asking for a specific version must get it, or version pinning is a lie.
+    variant_name: str | None = None
+    if model_version is None:
+        model_version, variant_name = experiments.resolve_version(
+            "tiny-imagenet-classifier", principal.user_id
+        )
 
     image_bytes = await _read_upload(file, inference.settings.max_upload_bytes)
 
@@ -71,6 +82,7 @@ async def classify_image(
             use_cache=use_cache,
             user_id=principal.user_id,
             user_tier=principal.tier.value,
+            variant=variant_name,
         )
     except Exception:
         model = inference.models.get_classifier(model_version)

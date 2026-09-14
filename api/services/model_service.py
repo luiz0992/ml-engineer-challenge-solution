@@ -36,7 +36,7 @@ from api.config import InferenceBackend, Settings
 from api.exceptions import ModelNotFoundError, ModelUnavailableError
 from api.logging_config import get_logger
 from api.models.schemas import TaskType
-from api.services.runtime import preload_cuda_libraries, preload_tensorrt_libraries
+from api.services.runtime import create_session
 
 logger = get_logger(__name__)
 
@@ -233,37 +233,17 @@ class ModelService:
         }.get(backend)
 
     def _create_session(self, artifact: Path, backend: InferenceBackend) -> tuple[Any, str]:
-        """Create an ONNX Runtime session, verifying the provider took effect.
+        """Create an ONNX Runtime session for ``backend``.
 
-        ONNX Runtime silently falls back to CPU when a requested provider
-        cannot load. Without this check the service would report itself as
-        running TensorRT while executing on CPU roughly a hundred times slower.
+        Delegates to :func:`api.services.runtime.create_session`, which
+        preloads GPU libraries and verifies the provider actually took effect.
+        Calling ``ort.InferenceSession`` directly is what allowed the cuDNN
+        lazy-resolution failure to recur in three separate places.
         """
-        import onnxruntime as ort
-
-        # Preload GPU libraries before session creation; see api.services.runtime.
-        if backend is InferenceBackend.TENSORRT:
-            preload_tensorrt_libraries()
-        elif backend is InferenceBackend.ONNX:
-            preload_cuda_libraries()
-
-        providers = _PROVIDER_FOR_BACKEND.get(backend, ["CPUExecutionProvider"])
-        available = set(ort.get_available_providers())
-        requested = [p for p in providers if p in available] or ["CPUExecutionProvider"]
-
-        options = ort.SessionOptions()
-        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-
-        session = ort.InferenceSession(str(artifact), sess_options=options, providers=requested)
-
-        selected = session.get_providers()[0]
-        if selected != requested[0]:
-            raise RuntimeError(
-                f"Requested provider {requested[0]} but ONNX Runtime selected "
-                f"{selected}; refusing to report a backend that is not in use."
-            )
-
-        return session, session.get_inputs()[0].name
+        return create_session(
+            str(artifact),
+            providers=_PROVIDER_FOR_BACKEND.get(backend, ["CPUExecutionProvider"]),
+        )
 
     @staticmethod
     def _warmup(

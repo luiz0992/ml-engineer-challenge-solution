@@ -1,0 +1,273 @@
+{
+  "classifier": {
+    "num_samples": 10000,
+    "acc_top1": 0.8578,
+    "acc_top5": 0.9651,
+    "per_class": {
+      "num_classes": 200,
+      "mean": 0.8578,
+      "std": 0.0864,
+      "min": 0.56,
+      "max": 1.0,
+      "worst_10": [
+        {
+          "class": "umbrella",
+          "accuracy": 0.56
+        },
+        {
+          "class": "pole",
+          "accuracy": 0.58
+        },
+        {
+          "class": "syringe",
+          "accuracy": 0.58
+        },
+        {
+          "class": "Egyptian cat",
+          "accuracy": 0.6
+        },
+        {
+          "class": "plate",
+          "accuracy": 0.64
+        },
+        {
+          "class": "tabby",
+          "accuracy": 0.66
+        },
+        {
+          "class": "frying pan",
+          "accuracy": 0.66
+        },
+        {
+          "class": "nail",
+          "accuracy": 0.68
+        },
+        {
+          "class": "bannister",
+          "accuracy": 0.7
+        },
+        {
+          "class": "plunger",
+          "accuracy": 0.7
+        }
+      ],
+      "best_10": [
+        {
+          "class": "gondola",
+          "accuracy": 1.0
+        },
+        {
+          "class": "bullet train",
+          "accuracy": 1.0
+        },
+        {
+          "class": "sulphur butterfly",
+          "accuracy": 1.0
+        },
+        {
+          "class": "dugong",
+          "accuracy": 1.0
+        },
+        {
+          "class": "bell pepper",
+          "accuracy": 0.98
+        },
+        {
+          "class": "trolleybus",
+          "accuracy": 0.98
+        },
+        {
+          "class": "triumphal arch",
+          "accuracy": 0.98
+        },
+        {
+          "class": "school bus",
+          "accuracy": 0.98
+        },
+        {
+          "class": "oboe",
+          "accuracy": 0.98
+        },
+        {
+          "class": "obelisk",
+          "accuracy": 0.98
+        }
+      ],
+      "below_50_percent": []
+    },
+    "calibration": {
+      "expected_calibration_error": 0.0852,
+      "mean_confidence": 0.7726,
+      "mean_accuracy": 0.8578,
+      "overconfidence": -0.0852,
+      "bins": [
+        {
+          "range": "0.0-0.1",
+          "count": 22,
+          "mean_confidence": 0.086,
+          "accuracy": 0.1818,
+          "gap": 0.0958
+        },
+        {
+          "range": "0.1-0.2",
+          "count": 180,
+          "mean_confidence": 0.1583,
+          "accuracy": 0.1889,
+          "gap": 0.0306
+        },
+        {
+          "range": "0.2-0.3",
+          "count": 348,
+          "mean_confidence": 0.2527,
+          "accuracy": 0.3276,
+          "gap": 0.0749
+        },
+        {
+          "range": "0.3-0.4",
+          "count": 467,
+          "mean_confidence": 0.3531,
+          "accuracy": 0.454,
+          "gap": 0.1009
+        },
+        {
+          "range": "0.4-0.5",
+          "count": 529,
+          "mean_confidence": 0.4523,
+          "accuracy": 0.5558,
+          "gap": 0.1035
+        },
+        {
+          "range": "0.5-0.6",
+          "count": 590,
+          "mean_confidence": 0.5489,
+          "accuracy": 0.6729,
+          "gap": 0.124
+        },
+        {
+          "range": "0.6-0.7",
+          "count": 678,
+          "mean_confidence": 0.6544,
+          "accuracy": 0.7906,
+          "gap": 0.1361
+        },
+        {
+          "range": "0.7-0.8",
+          "count": 961,
+          "mean_confidence": 0.7552,
+          "accuracy": 0.898,
+          "gap": 0.1428
+        },
+        {
+          "range": "0.8-0.9",
+          "count": 1989,
+          "mean_confidence": 0.8604,
+          "accuracy": 0.9633,
+          "gap": 0.1029
+        },
+        {
+          "range": "0.9-1.0",
+          "count": 4236,
+          "mean_confidence": 0.944,
+          "accuracy": 0.9934,
+          "gap": 0.0494
+        }
+      ]
+    }
+  },
+  "similarity": {
+    "num_queries": 1000,
+    "index_size": 20000,
+    "precision_at_1": 0.815,
+    "precision_at_5": 0.7968,
+    "precision_at_10": 0.7866,
+    "per_class": {
+      "classes_evaluated": 198,
+      "mean": 0.8041,
+      "std": 0.1923,
+      "worst_10": [
+        {
+          "class": "pole",
+          "precision_at_5": 0.1
+        },
+        {
+          "class": "bannister",
+          "precision_at_5": 0.1333
+        },
+        {
+          "class": "rocking chair",
+          "precision_at_5": 0.2
+        },
+        {
+          "class": "water jug",
+          "precision_at_5": 0.2857
+        },
+        {
+          "class": "pretzel",
+          "precision_at_5": 0.3333
+        },
+        {
+          "class": "cardigan",
+          "precision_at_5": 0.4
+        },
+        {
+          "class": "bucket",
+          "precision_at_5": 0.4286
+        },
+        {
+          "class": "stopwatch",
+          "precision_at_5": 0.44
+        },
+        {
+          "class": "grasshopper",
+          "precision_at_5": 0.45
+        },
+        {
+          "class": "umbrella",
+          "precision_at_5": 0.45
+        }
+      ],
+      "best_10": [
+        {
+          "class": "pomegranate",
+          "precision_at_5": 1.0
+        },
+        {
+          "class": "mushroom",
+          "precision_at_5": 1.0
+        },
+        {
+          "class": "bell pepper",
+          "precision_at_5": 1.0
+        },
+        {
+          "class": "viaduct",
+          "precision_at_5": 1.0
+        },
+        {
+          "class": "torch",
+          "precision_at_5": 1.0
+        },
+        {
+          "class": "thatch",
+          "precision_at_5": 1.0
+        },
+        {
+          "class": "suspension bridge",
+          "precision_at_5": 1.0
+        },
+        {
+          "class": "sock",
+          "precision_at_5": 1.0
+        },
+        {
+          "class": "snorkel",
+          "precision_at_5": 1.0
+        },
+        {
+          "class": "scoreboard",
+          "precision_at_5": 1.0
+        }
+      ]
+    }
+  }
+}

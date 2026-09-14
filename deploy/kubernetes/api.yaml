@@ -1,0 +1,255 @@
+# Kubernetes deployment with horizontal autoscaling.
+#
+#   kubectl apply -f deploy/kubernetes/
+#
+# Compose has no autoscaler -- `replicas` is a fixed number and scaling means a
+# redeploy. This manifest exists because "autoscaling" is not a property you can
+# demonstrate in Compose, and claiming it there would be misleading.
+#
+# The scaling signal is the interesting decision; see the HPA below.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ml-api
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ml-api-config
+  namespace: ml-api
+data:
+  APP_ENV: "production"
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  CELERY_BROKER_URL: "redis://redis:6379/1"
+  CELERY_RESULT_BACKEND: "redis://redis:6379/2"
+  ARTIFACTS_DIR: "/app/models/artifacts"
+  INFERENCE_BACKEND: "onnx"
+---
+# Secrets are referenced, never defined here. A committed Secret is a committed
+# credential regardless of the base64 encoding, which is not encryption.
+# Create it out of band:
+#
+#   kubectl -n ml-api create secret generic ml-api-secrets \
+#     --from-literal=JWT_SECRET_KEY="$(openssl rand -hex 32)" \
+#     --from-literal=POSTGRES_PASSWORD=... \
+#     --from-literal=POSTGRES_USER=... \
+#     --from-literal=POSTGRES_DB=...
+#
+# In a real cluster this comes from External Secrets, Vault, or a cloud secret
+# manager, so rotation does not require touching manifests.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-api
+  namespace: ml-api
+  labels:
+    app: ml-api
+spec:
+  selector:
+    app: ml-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-api
+  namespace: ml-api
+  labels:
+    app: ml-api
+spec:
+  # No `replicas` field. The HPA owns it, and setting both means every
+  # `kubectl apply` resets the replica count to the manifest value and undoes
+  # whatever scaling decision the autoscaler had made.
+  selector:
+    matchLabels:
+      app: ml-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: ml-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/api/v1/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ml-api
+          image: mlchal-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: ml-api-config
+            - secretRef:
+                name: ml-api-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              # Requests drive scheduling and, more importantly here, the HPA's
+              # utilisation arithmetic. A request set far below actual usage
+              # makes every pod look saturated.
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "4Gi"
+          volumeMounts:
+            - name: artifacts
+              mountPath: /app/models/artifacts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          # Liveness deliberately checks nothing beyond the process. Making it
+          # depend on Redis or Postgres restarts healthy pods when something
+          # downstream fails, turning a partial outage into a cluster-wide
+          # crash loop.
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 3
+          # Readiness gates traffic on a model being loaded, so a pod receives
+          # no requests during its startup window.
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          # Startup probe with a generous budget: loading and warming up a
+          # model takes far longer than a steady-state health check, and
+          # without this the liveness probe would kill the pod mid-startup.
+          startupProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: model-artifacts
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ml-api
+  namespace: ml-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ml-api
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    # The primary signal is in-flight requests per pod, not CPU.
+    #
+    # CPU is the obvious choice and the wrong one here. Inference saturates the
+    # GPU, or the thread pool that ONNX Runtime's blocking Run() occupies, well
+    # before CPU utilisation looks high. A CPU-targeted autoscaler therefore
+    # scales *after* latency has already degraded -- it measures a resource
+    # that is not the bottleneck.
+    #
+    # `http_requests_in_progress` is the queue a user actually waits in, and it
+    # is already exported by the metrics middleware. A sustained value above
+    # ~20 per pod means requests are arriving faster than they are served.
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_in_progress
+        target:
+          type: AverageValue
+          averageValue: "20"
+    # CPU retained as a secondary guard, deliberately high. It catches a
+    # genuinely CPU-bound regression (a fallback to the CPU execution provider,
+    # for instance) that the queue metric alone might not surface quickly.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      # React quickly: the cost of an unnecessary pod is small, the cost of a
+      # queue building is paid by every user in it.
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      # Slowly, and never more than one pod per minute. Each terminating pod
+      # drops its in-memory model and the next one pays the load-and-warm cost
+      # again; aggressive scale-down produces a thrash that looks like
+      # instability.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ml-api
+  namespace: ml-api
+spec:
+  # Without this, a node drain can evict every replica at once and take the
+  # service down during routine maintenance -- which is exactly when nobody is
+  # watching for it.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: ml-api
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-artifacts
+  namespace: ml-api
+spec:
+  # ReadOnlyMany so every replica mounts the same artefacts. The serving
+  # process has no reason to write to them, and a read-only mount means a
+  # compromised pod cannot swap the model.
+  accessModes: ["ReadOnlyMany"]
+  resources:
+    requests:
+      storage: 5Gi

@@ -73,6 +73,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-int8", action="store_true")
     parser.add_argument("--skip-tensorrt", action="store_true")
     parser.add_argument("--skip-compile", action="store_true", help="Skip torch.compile benchmark")
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=["classifier"],
+        choices=["classifier", "detector", "embedder", "all"],
+        help="Which models to benchmark. Detector and embedder are inference-only.",
+    )
     return parser
 
 
@@ -101,8 +108,13 @@ def main(argv: list[str] | None = None) -> int:
         accuracies = _quantize(args, fp32_path, int8_path, image_size)
 
     # --- Benchmark --------------------------------------------------------
-    # Must run before any InferenceSession is created; see the docstring for
-    # why ORT would otherwise fall back to CPU without saying so.
+    # Both must run before any InferenceSession is created. CUDA resolves cuDNN
+    # lazily at the first kernel launch, so without the preload a session builds
+    # cleanly and then fails every inference with NOT_IMPLEMENTED. TensorRT
+    # fails earlier but silently, by falling back to CPU.
+    from api.services.runtime import preload_cuda_libraries
+
+    preload_cuda_libraries()
     trt_available = (not args.skip_tensorrt) and ensure_tensorrt_loadable()
 
     report = BenchmarkReport(environment=capture_environment(), generated_at=now_iso())
@@ -192,6 +204,67 @@ def main(argv: list[str] | None = None) -> int:
     # separate tables.
     _annotate_accuracy(report, accuracies, args.accuracy_samples)
 
+    # --- Additional models --------------------------------------------------
+    selected = set(args.models)
+    if "all" in selected:
+        selected = {"classifier", "detector", "embedder"}
+
+    for name, filename, image_size in (
+        ("detector", "detector_fp32.onnx", 640),
+        ("embedder", "embedder_fp32.onnx", 224),
+    ):
+        if name not in selected:
+            continue
+
+        path = args.artifacts_dir / filename
+        if not path.exists():
+            logger.warning("%s not found at %s; skipping", name, path)
+            continue
+
+        logger.info("--- %s ---", name)
+        for batch_size in args.batch_sizes:
+            # Detection at 640x640 is roughly eight times the pixels of a
+            # 224x224 classification input, so large batches exhaust GPU memory
+            # long before they saturate compute.
+            if name == "detector" and batch_size > 8:
+                continue
+
+            common = {
+                "batch_size": batch_size,
+                "image_size": image_size,
+                "warmup": args.warmup,
+                "iterations": args.iterations,
+            }
+            extra_cases: list[tuple[str, Callable[[], LatencyResult]]] = [
+                (
+                    f"{name} onnx cpu",
+                    partial(benchmark_onnx, path, provider="CPUExecutionProvider", **common),
+                )
+            ]
+            if has_cuda:
+                extra_cases.append(
+                    (
+                        f"{name} onnx cuda",
+                        partial(benchmark_onnx, path, provider="CUDAExecutionProvider", **common),
+                    )
+                )
+                if trt_available:
+                    extra_cases.append(
+                        (
+                            f"{name} tensorrt fp16",
+                            partial(
+                                benchmark_onnx,
+                                path,
+                                provider="TensorrtExecutionProvider",
+                                precision="fp16",
+                                **common,
+                            ),
+                        )
+                    )
+
+            for label, case in extra_cases:
+                _try(report, label, case, model=name)
+
     # --- Report -----------------------------------------------------------
     args.output_dir.mkdir(parents=True, exist_ok=True)
     report.write_json(args.output_dir / "results.json")
@@ -276,7 +349,13 @@ def _annotate_accuracy(
         result.notes = note
 
 
-def _try(report: BenchmarkReport, label: str, fn: Callable[[], LatencyResult]) -> None:
+def _try(
+    report: BenchmarkReport,
+    label: str,
+    fn: Callable[[], LatencyResult],
+    *,
+    model: str = "classifier",
+) -> None:
     """Run one benchmark, recording failures without aborting the sweep.
 
     A missing execution provider or an unbuildable TensorRT engine should cost
@@ -284,6 +363,7 @@ def _try(report: BenchmarkReport, label: str, fn: Callable[[], LatencyResult]) -
     """
     try:
         result = fn()
+        result.model = model
         report.results.append(result)
         logger.info(
             "  %-22s %7.2f ms  (p95 %6.2f)  %8.1f img/s",

@@ -115,6 +115,34 @@ Pillow precisely so the training stack can be left out. Both run as a non-root
 user (uid 1001), and model artifacts are mounted read-only rather than baked in,
 so a new model version needs no rebuild.
 
+### Kubernetes
+
+```bash
+kubectl apply -f deploy/kubernetes/
+```
+
+Includes a HorizontalPodAutoscaler targeting `http_requests_in_progress` per
+pod rather than CPU — inference saturates the GPU or the thread pool well
+before CPU looks busy, so a CPU-targeted autoscaler scales after latency has
+already degraded. Scheduled work runs as CronJobs with retry policies and run
+history, which the sleeping containers Compose requires cannot provide.
+
+### GPU and scheduled maintenance
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+```
+
+The GPU overlay adds device reservations and installs `onnxruntime-gpu` plus
+TensorRT, taking inference from ~170 ms (CPU) to ~1 ms. It is a separate
+overlay because a Compose file that demands a GPU fails outright on a machine
+without one.
+
+The `maintenance` service creates upcoming monthly partitions and drops expired
+ones daily. `inference_logs` is partitioned by month: dropping a partition is
+instant where deleting a month of rows is a long-running statement that bloats
+the table. Retention defaults to six months.
+
 ### Troubleshooting
 
 **`Temporary failure resolving deb.debian.org` during build.** BuildKit cannot
@@ -168,8 +196,18 @@ uv run python -m models.training.train
 
 ### Object detection — COCO (80 classes)
 
-RT-DETR R18, Apache-2.0, used pretrained. **15 ms** per image. Verified on COCO
-`000000039769`: two cats, two remotes, and a sofa, all at 0.74–0.95 confidence.
+RT-DETR R18, Apache-2.0, used pretrained.
+
+| Metric | Value |
+| --- | ---: |
+| **mAP@[.5:.95]** | **0.500** (measured on COCO val2017) |
+| mAP@0.5 | 0.667 |
+| mAP small / large | 0.347 / 0.627 |
+| Latency (TensorRT FP16) | **1.4 ms** |
+
+Evaluated with `pycocotools`, not quoted from the publication. The
+small-object gap of 0.280 is the model's real
+weakness.
 
 Licensing drove the model choice: Ultralytics YOLOv8/v11 are AGPL-3.0, which
 obliges anyone offering the service over a network to publish their source.
@@ -181,23 +219,49 @@ over 20,000 training images.
 
 | Metric | Value |
 | --- | --- |
-| Precision@5 | **92%** |
+| Precision@1 | 81.5% |
+| **Precision@5** | **79.7%** |
 | Query latency | ~5 ms |
 | Embedding | 384-d, L2-normalised, cosine similarity |
+
+Measured over 1,000 validation queries across all 200 classes. Per-class
+variation is large (19.2pp sd): context-defined categories like `pole` retrieve
+at 10%, distinctive ones near-perfectly.
 
 Retrieves **semantically** similar images rather than near-duplicates —
 classification features collapse intra-class variation by construction. For
 near-duplicate detection a perceptual hash would be the right tool.
 
+### Measured quality
+
+`scripts/evaluate_models.py` reports per-class accuracy and calibration.
+
+| | |
+| --- | --- |
+| Per-class accuracy | mean 85.8%, sd 8.6pp, range 56–100%, **none below 50%** |
+| Calibration (ECE) | 0.0852, **underconfident by 0.085** |
+
+The classifier reports 77.3% mean confidence while being right 85.8% of the
+time. Thresholding at 0.9 discards many predictions that are correct 96% of the
+time; **0.75 is the right threshold for ~95% precision**.
+
 ### Model validation
 
 `models/validation/` provides drift detection, A/B testing, and regression
-gates, all operating on the inference audit trail.
+gates, all operating on the inference audit trail. Drift results are pushed to
+Prometheus so they alert through the same routing as everything else.
 
 ```bash
 uv run python scripts/analyse_drift.py --baseline-days 7 --current-days 1
 uv run python scripts/check_regression.py
+uv run python scripts/evaluate_models.py
 ```
+
+**A/B testing is wired into the serving path.** An experiment file at
+`models/artifacts/experiments.json` splits traffic across model versions; the
+assigned variant is recorded in the audit trail so the arms can be compared.
+An explicit `?model_version=` always overrides an experiment, and a malformed
+experiment degrades to the active version rather than failing requests.
 
 Drift uses PSI for categorical features and Kolmogorov-Smirnov for continuous
 ones, with **severity driven by effect size rather than p-value** — at
@@ -216,6 +280,9 @@ recommendation in [`benchmarks/ANALYSIS.md`](benchmarks/ANALYSIS.md).
 | PyTorch eager FP32 | 16.78 ms | 1,907 img/s | 1.00x | 87.25% |
 | PyTorch eager bf16 | 5.23 ms | 6,118 img/s | 3.21x | 87.25% |
 | **TensorRT FP16** | **3.49 ms** | **9,177 img/s** | **4.81x** | 87.25% |
+
+All three models have TensorRT engines: classifier 8,822 img/s, embedder
+9,006 img/s, detector 968 img/s (batch 8, at 8x the input pixels).
 | ONNX Runtime CPU INT8 | 475 ms | 67 img/s | 0.04x | 81.85% |
 
 Single-image latency is 1.05 ms under TensorRT, three orders of magnitude

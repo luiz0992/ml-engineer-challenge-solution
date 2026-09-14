@@ -11,6 +11,11 @@ global:
     environment: development
     service: ml-engineer-challenge
 
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
 rule_files:
   - /etc/prometheus/alerts.yml
 
@@ -25,3 +30,12 @@ scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
+
+  # Batch jobs push here because they exit and cannot be scraped.
+  # honor_labels preserves the job/instance labels the pusher set; without it
+  # Prometheus overwrites them with the pushgateway's own, and every batch job
+  # appears to come from the gateway.
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]

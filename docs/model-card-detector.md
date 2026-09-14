@@ -50,26 +50,52 @@ deploying detectors.
 
 ## Performance
 
-Published COCO val2017 figures for this checkpoint — **not reproduced here**,
-since the model is used as released and no COCO evaluation was run in this
-project. Stated for reference, not as a claim.
+**Measured** on COCO val2017 with `pycocotools`, the reference implementation
+used by the COCO leaderboard — not quoted from the model's publication.
 
-| Metric | Value (published) |
-| --- | --- |
-| mAP@[.5:.95] | 46.5 |
-| Input resolution | 640×640 |
+| Metric | Measured |
+| --- | ---: |
+| **mAP@[.5:.95]** | **0.500** |
+| mAP@0.5 | 0.667 |
+| mAP@0.75 | 0.539 |
+| mAP small | 0.347 |
+| mAP medium | 0.516 |
+| mAP large | 0.627 |
+| AR@100 | 0.686 |
 
-### Measured in this project
+Evaluated on 1000 images at a score threshold of
+0.01. The threshold is deliberately far below the serving
+default of 0.5: mAP integrates precision over the full recall curve, so
+discarding low-scoring detections truncates the curve and *understates* the
+score. 0.5 is an operating point for a user; it is the wrong threshold for
+measuring a model.
 
-| Property | Value |
-| --- | --- |
-| Inference latency | **15 ms** per image (ONNX Runtime, CPU) |
-| Export fidelity | max abs. difference 3.6e-06 vs PyTorch |
-| Artefact size | 84.3 MB (FP32 ONNX) |
+**Small objects are measurably the weakness**: 0.347 against
+0.627 for large objects — a gap of
+0.280. This is characteristic of the model
+family, and the R18 backbone is weaker here than deeper variants. A caller
+detecting small or distant objects should expect materially worse results than
+the headline figure.
 
-Functional verification on COCO val2017 image `000000039769` (two cats on a
-couch with two remotes): all six objects detected at confidence 0.74–0.95, every
-box inside the image bounds.
+### Latency
+
+| Backend | Batch 1 | Batch 8 |
+| --- | ---: | ---: |
+| ONNX Runtime CPU | 67.6 ms | 557.6 ms |
+| ONNX Runtime CUDA | 3.9 ms | 29.4 ms |
+| **TensorRT FP16** | **1.4 ms** | **8.3 ms** |
+
+TensorRT gives 2.9x over the CUDA provider. Batches above 8 are not benchmarked:
+at 640x640 a detection input is roughly eight times the pixels of a 224x224
+classification input, so large batches exhaust GPU memory long before they
+saturate compute.
+
+Export fidelity: max absolute difference 3.6e-06 against PyTorch. Artefact size
+84.3 MB.
+
+Functional verification on COCO `000000039769` (two cats on a couch with two
+remotes): all six objects detected at 0.74–0.95 confidence, every box inside the
+image bounds.
 
 ## Preprocessing
 
@@ -105,17 +131,17 @@ clipped to its bounds, so a client can overlay them directly.
 
 ## Limitations
 
-**Not evaluated on this project's data.** The published mAP is COCO's. No
-independent evaluation was run, so real-world accuracy on any other
-distribution is unknown.
+**Evaluated on COCO only.** mAP of 0.500 is measured on COCO
+val2017, which is the distribution the model was trained for. Accuracy on any
+other distribution — different cameras, domains, or image quality — remains
+unknown.
 
 **Fixed 640×640 input.** The model has learned positional priors at this
 resolution; it is not a tunable parameter. Images far from square are squashed,
 which degrades detection of elongated objects.
 
-**Small objects are the known weakness.** COCO small-object AP is substantially
-below the headline figure for all detectors in this family, and the R18 backbone
-is weaker here than deeper variants.
+**Small objects are measurably weaker**: mAP 0.347 against
+0.627 for large objects. See the performance table.
 
 **Closed vocabulary.** Only the 80 COCO classes. Anything else is either missed
 or misassigned to the nearest category.

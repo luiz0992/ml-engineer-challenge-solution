@@ -205,3 +205,91 @@ class TestIndexConstruction:
 
         assert indices[0][0] == 5
         assert scores[0][0] == pytest.approx(1.0, abs=1e-5)
+
+
+class TestIndexMaintenance:
+    """Incremental updates, so the index is not a static artefact."""
+
+    def test_append_adds_without_rebuilding(self, similarity_artifacts: Path) -> None:
+        from models.optimisation.export_embedding import append_to_index
+
+        rng = np.random.default_rng(0)
+        vectors = rng.standard_normal((5, 8)).astype(np.float32)
+        vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+
+        metadata = append_to_index(
+            similarity_artifacts,
+            vectors,
+            labels=[1, 2, 3, 4, 5],
+            paths=[f"new_{i}.jpg" for i in range(5)],
+        )
+
+        assert metadata.num_vectors == 55
+
+    def test_append_rejects_non_normalised_vectors(self, similarity_artifacts: Path) -> None:
+        """Mixed normalisation makes scores incomparable across the index.
+
+        Only the new rows would be wrong, and nothing raises at query time.
+        """
+        from models.optimisation.export_embedding import append_to_index
+
+        with pytest.raises(ValueError, match="unit-norm"):
+            append_to_index(
+                similarity_artifacts,
+                np.random.default_rng(0).standard_normal((3, 8)).astype(np.float32),
+                labels=[1, 2, 3],
+                paths=["a.jpg", "b.jpg", "c.jpg"],
+            )
+
+    def test_append_rejects_mismatched_dimensions(self, similarity_artifacts: Path) -> None:
+        """Different dimensions mean the embeddings came from another model."""
+        from models.optimisation.export_embedding import append_to_index
+
+        vectors = np.zeros((2, 16), dtype=np.float32)
+        vectors[:, 0] = 1.0
+
+        with pytest.raises(ValueError, match="dimension"):
+            append_to_index(similarity_artifacts, vectors, labels=[1, 2], paths=["a.jpg", "b.jpg"])
+
+    def test_append_keeps_index_and_manifest_aligned(self, similarity_artifacts: Path) -> None:
+        import faiss
+
+        from models.optimisation.export_embedding import append_to_index
+
+        rng = np.random.default_rng(1)
+        vectors = rng.standard_normal((7, 8)).astype(np.float32)
+        vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+
+        append_to_index(
+            similarity_artifacts,
+            vectors,
+            labels=list(range(7)),
+            paths=[f"x_{i}.jpg" for i in range(7)],
+        )
+
+        index = faiss.read_index(str(similarity_artifacts / "similarity.index"))
+        manifest = json.loads((similarity_artifacts / "similarity_manifest.json").read_text())
+
+        assert index.ntotal == len(manifest["labels"]) == len(manifest["paths"])
+
+    def test_labels_can_be_changed_without_re_embedding(self, similarity_artifacts: Path) -> None:
+        """Relabelling is a manifest edit; the vectors do not change.
+
+        This was previously documented as requiring a full rebuild, which was
+        simply untrue.
+        """
+        from models.optimisation.export_embedding import update_index_labels
+
+        changed = update_index_labels(similarity_artifacts, {0: 99, 1: 98})
+
+        assert changed == 2
+        manifest = json.loads((similarity_artifacts / "similarity_manifest.json").read_text())
+        assert manifest["labels"][0] == 99
+        assert manifest["labels"][1] == 98
+
+    def test_label_update_rejects_rows_outside_the_index(self, similarity_artifacts: Path) -> None:
+        """A row beyond the end would desynchronise manifest from index."""
+        from models.optimisation.export_embedding import update_index_labels
+
+        with pytest.raises(IndexError, match="outside the index"):
+            update_index_labels(similarity_artifacts, {9999: 1})

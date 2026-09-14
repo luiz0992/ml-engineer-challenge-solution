@@ -1,0 +1,56 @@
+# GPU overlay.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Requires the NVIDIA Container Toolkit on the host. Without it the base stack
+# runs ONNX Runtime on CPU at roughly 170 ms per image; with it, TensorRT
+# reaches 1.05 ms. See benchmarks/ANALYSIS.md.
+#
+# This is a separate overlay rather than the default because a Compose file
+# that demands a GPU fails outright on a machine without one. The base stack is
+# portable; this opts into hardware when it exists.
+
+name: ml-engineer-challenge
+
+services:
+  ml-api:
+    build:
+      # The GPU image adds onnxruntime-gpu and the CUDA runtime libraries. The
+      # CPU image deliberately omits them -- they are roughly 2 GB, and a
+      # CPU-only deployment gains nothing from carrying them.
+      args:
+        INSTALL_GPU: "true"
+    environment:
+      # TensorRT builds an engine per input shape on first use, which takes
+      # minutes. The cache makes that a one-time cost per shape rather than a
+      # cost on every container start.
+      INFERENCE_BACKEND: tensorrt
+      ORT_TENSORRT_ENGINE_CACHE_ENABLE: "1"
+      ORT_TENSORRT_CACHE_PATH: /app/models/artifacts/onnx/trt_cache
+      ORT_TENSORRT_FP16_ENABLE: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  worker:
+    build:
+      args:
+        INSTALL_GPU: "true"
+    environment:
+      INFERENCE_BACKEND: tensorrt
+      ORT_TENSORRT_ENGINE_CACHE_ENABLE: "1"
+      ORT_TENSORRT_CACHE_PATH: /app/models/artifacts/onnx/trt_cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Workers and the API share one GPU here. At scale they would be
+              # scheduled onto separate devices; sharing means a large batch job
+              # competes with interactive requests for memory and SMs.
+              count: 1
+              capabilities: [gpu]

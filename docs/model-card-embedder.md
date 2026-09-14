@@ -48,21 +48,48 @@ recall; choosing approximation before exact search is too slow is premature.
 
 ## Performance
 
+Measured over **1,000 validation queries sampled across all 200 classes**
+against the 20,000-image training index. Queries come from validation and the
+index from training, so a query can never retrieve itself.
+
 | Metric | Value |
 | --- | --- |
-| **Precision@5** | **92%** (23/25 retrieved images share the query's class) |
-| Query latency | ~5 ms (ONNX Runtime CPU, including embedding) |
+| Precision@1 | **81.5%** |
+| **Precision@5** | **79.7%** |
+| Precision@10 | 78.7% |
+| Query latency | ~5 ms (ONNX Runtime, including embedding) |
 | Index size | 30 MB, 20,000 vectors |
 | Export fidelity | max abs. difference 2.7e-07 vs PyTorch |
 
-Measured across five query classes drawn from the validation split. Retrieval
-quality varies noticeably by class: visually distinctive categories (goldfish,
-tabby, orange) returned 5/5 with similarities of 0.72–0.84, while an ambiguous
-category (`reel`) returned 3/5 at 0.45–0.47.
+> **A correction.** An earlier version of this card reported 92% precision@5.
+> That figure came from five hand-picked classes and did not survive proper
+> measurement: across all 200 classes the real number is **79.7%**. The
+> original sample happened to contain visually distinctive categories. It is
+> recorded here because a cherry-picked benchmark that flatters the model is
+> exactly the kind of number that should not be trusted, including when it is
+> your own.
 
-**Lower similarity scores indicate lower confidence**, and the `reel` result
-shows the pattern clearly. A caller can use `min_similarity` to trade recall for
-precision, though no calibrated threshold has been established.
+### Per-class variation is large
+
+Mean per-class P@5 is 80.4% with a standard deviation of **19.2 percentage
+points** — far wider than the classifier's 8.6pp. Retrieval is much less
+uniform than classification.
+
+| Weakest classes | P@5 |
+| --- | ---: |
+| pole | 10.0% |
+| bannister | 13.3% |
+| rocking chair | 20.0% |
+| water jug | 28.6% |
+| pretzel | 33.3% |
+
+The pattern is consistent: categories defined by *context* rather than
+appearance (a pole, a bannister) retrieve poorly, because the embedding
+captures overall scene composition and those objects rarely dominate their
+frame. Categories with distinctive colour and texture retrieve near-perfectly.
+
+**A caller should not assume uniform quality.** For a context-dependent
+category, retrieval is close to useless.
 
 ## Index construction
 
@@ -94,12 +121,10 @@ never optimised to separate them.
 texture and small detail are absent from the embeddings, so similarity is driven
 by coarse shape and colour.
 
-**Precision@5 was measured on five classes**, not all 200. The 92% figure is
-indicative, not a rigorous benchmark, and per-class variation is demonstrably
-large.
-
-**No index freshness mechanism.** The index is a static artefact. Adding images
-requires a rebuild; there is no incremental update path.
+**Per-class retrieval varies by 19.2 percentage points**, more than twice the
+classifier's spread. The 79.7% aggregate is a poor predictor for any specific
+category: context-defined ones (`pole`, `bannister`) retrieve at 10–13%. A
+caller should not assume uniform quality.
 
 **Memory-resident.** The full index loads into memory at startup. At 30 MB that
 is trivial; at 10 million vectors (roughly 15 GB) it would require an on-disk or

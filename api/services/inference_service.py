@@ -73,8 +73,14 @@ class InferenceService:
         use_cache: bool = True,
         user_id: str | None = None,
         user_tier: str | None = None,
+        variant: str | None = None,
     ) -> ClassificationResponse:
-        """Classify a single image."""
+        """Classify a single image.
+
+        ``variant`` records which A/B arm served the request. It is written to
+        the audit trail so the two arms can be compared afterwards; without it
+        an experiment produces traffic but no analysable result.
+        """
         started = time.perf_counter()
 
         metadata = validate_image_upload(
@@ -111,6 +117,7 @@ class InferenceService:
                 user_id=user_id,
                 user_tier=user_tier,
                 image_sha256=image_sha256,
+                variant=variant,
             )
             return ClassificationResponse(
                 predictions=predictions,
@@ -136,6 +143,7 @@ class InferenceService:
                 user_id=user_id,
                 user_tier=user_tier,
                 image_sha256=image_sha256,
+                variant=variant,
                 status="failure",
                 error_code=getattr(exc, "code", type(exc).__name__),
             )
@@ -170,6 +178,7 @@ class InferenceService:
             user_id=user_id,
             user_tier=user_tier,
             image_sha256=image_sha256,
+            variant=variant,
         )
         return response
 
@@ -188,6 +197,7 @@ class InferenceService:
         status: str = "success",
         error_code: str | None = None,
         batch_size: int = 1,
+        variant: str | None = None,
     ) -> None:
         """Queue an audit record. Never raises and never blocks.
 
@@ -211,6 +221,7 @@ class InferenceService:
             cached=cached,
             batch_size=batch_size,
             image_sha256=image_sha256,
+            variant=variant,
             image_bytes=getattr(metadata, "size_bytes", None),
             image_width=getattr(metadata, "width", None),
             image_height=getattr(metadata, "height", None),

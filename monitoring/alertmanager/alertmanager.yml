@@ -1,0 +1,110 @@
+# Alertmanager routing.
+#
+# Defines how alerts reach people. Prometheus decides *what* is wrong;
+# Alertmanager decides *who* hears about it and how often.
+#
+# Receiver endpoints come from the environment, never from this file. A
+# committed webhook URL is a committed credential — anyone with the repository
+# can post to your incident channel.
+#
+# The routing tree encodes one judgement: a warning that pages someone at 3am
+# trains them to silence the pager. Severity decides the channel, not just the
+# message.
+
+# Alertmanager performs no environment substitution, so a config referencing
+# ${SLACK_WEBHOOK_URL} fails to load outright with "unsupported scheme" when
+# the variable is unset -- taking the whole container down for a notification
+# channel nobody configured locally.
+#
+# The receivers below therefore declare no delivery configs. The routing tree,
+# grouping, and inhibit rules -- the parts that encode actual judgement -- are
+# fully active and inspectable in the Alertmanager UI. Adding delivery is a
+# matter of uncommenting the block under each receiver and supplying the
+# endpoint through your secret manager.
+global:
+  resolve_timeout: 5m
+
+route:
+  # Group by alert and model so a single degraded model produces one
+  # notification rather than one per replica.
+  group_by: ["alertname", "model"]
+  # Wait before sending, so related alerts from the same incident arrive
+  # together. A model failure typically trips three rules within seconds.
+  group_wait: 30s
+  group_interval: 5m
+  # Do not re-notify for four hours. More frequent repetition is how a
+  # long-running known issue turns into noise that masks a new one.
+  repeat_interval: 4h
+  receiver: slack-warnings
+
+  routes:
+    # Critical pages; everything else goes to a channel.
+    - matchers:
+        - severity = "critical"
+      receiver: pagerduty
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: true
+
+    - matchers:
+        - severity = "critical"
+      receiver: slack-critical
+
+    # Model-quality alerts are deliberately *not* paged. Drift is not an
+    # incident: it is a signal that the model's assumptions are expiring, and
+    # the correct response is an investigation during working hours. Paging on
+    # it would be the fastest way to get drift alerts muted permanently.
+    - matchers:
+        - alertname =~ "ModelDrift.*|AuditDefaultPartition.*"
+      receiver: slack-ml
+      group_interval: 1h
+      repeat_interval: 24h
+
+inhibit_rules:
+  # If the API is down, suppress the consequences. Without this a single
+  # outage produces a cascade of latency, error-rate, and saturation alerts
+  # that bury the one line saying what actually happened.
+  - source_matchers:
+      - alertname = "APIDown"
+    target_matchers:
+      - severity =~ "warning|critical"
+    equal: ["namespace"]
+
+  - source_matchers:
+      - alertname = "NoModelLoaded"
+    target_matchers:
+      - alertname =~ "InferenceFailures|HighErrorRate"
+
+receivers:
+  - name: pagerduty
+    # pagerduty_configs:
+    #   - service_key: <from your secret manager>
+    #     description: "{{ .CommonAnnotations.summary }}"
+    #     details:
+    #       description: "{{ .CommonAnnotations.description }}"
+
+  - name: slack-critical
+    # slack_configs:
+    #   - api_url: <webhook from your secret manager>
+    #     channel: "#ml-api-incidents"
+    #     title: "[CRITICAL] {{ .CommonAnnotations.summary }}"
+    #     # The description carries the runbook step; an alert without an
+    #     # action is noise.
+    #     text: "{{ .CommonAnnotations.description }}"
+    #     send_resolved: true
+
+  - name: slack-warnings
+    # slack_configs:
+    #   - api_url: <webhook from your secret manager>
+    #     channel: "#ml-api-alerts"
+    #     title: "[{{ .Status | toUpper }}] {{ .CommonAnnotations.summary }}"
+    #     text: "{{ .CommonAnnotations.description }}"
+    #     send_resolved: true
+
+  - name: slack-ml
+    # slack_configs:
+    #   - api_url: <webhook from your secret manager>
+    #     channel: "#ml-model-quality"
+    #     title: "[model] {{ .CommonAnnotations.summary }}"
+    #     text: "{{ .CommonAnnotations.description }}"
+    #     send_resolved: false

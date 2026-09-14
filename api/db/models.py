@@ -71,6 +71,12 @@ class InferenceLog(Base):
     backend: Mapped[str] = mapped_column(String(32), nullable=False)
     task: Mapped[str] = mapped_column(String(32), nullable=False)
 
+    #: A/B experiment arm, when one applied. Null for the common case of no
+    #: active experiment. Stored as a column rather than in `notes` because the
+    #: comparison in models/validation/ab_testing.py groups by it, and grouping
+    #: on a parsed free-text field would be both slow and fragile.
+    variant: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # --- Outcome ----------------------------------------------------------
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -136,6 +142,15 @@ class InferenceLog(Base):
         ),
         # Repeat-submission analysis and cache effectiveness.
         Index("ix_inference_logs_image_sha256", image_sha256),
+        # A/B comparison reads one experiment's arms over a window. Partial, so
+        # it costs nothing on the overwhelming majority of rows that belong to
+        # no experiment.
+        Index(
+            "ix_inference_logs_variant",
+            variant,
+            created_at.desc(),
+            postgresql_where=variant.is_not(None),
+        ),
     )
 
     def __repr__(self) -> str:

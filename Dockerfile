@@ -38,13 +38,25 @@ COPY pyproject.toml uv.lock README.md ./
 
 # --no-install-project installs dependencies without the local package, so the
 # cached layer survives changes to our own source.
+# GPU support is opt-in. onnxruntime-gpu plus the CUDA runtime libraries add
+# roughly 2 GB, which a CPU-only deployment gains nothing from carrying.
+ARG INSTALL_GPU=false
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$INSTALL_GPU" = "true" ]; then \
+        uv pip install --python /build/.venv/bin/python \
+            onnxruntime-gpu "tensorrt-cu12>=10,<11"; \
+    fi
 
 # ---------------------------------------------------------------------------
 # Runtime: the common base for both services.
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime
+
+ARG INSTALL_GPU=false
 
 # libgomp1 is required by ONNX Runtime's threading layer; curl is used by the
 # container health checks. Installed with --no-install-recommends and the apt
@@ -77,6 +89,17 @@ WORKDIR /app
 # rebuild.
 COPY --chown=app:app api/ ./api/
 COPY --chown=app:app worker/ ./worker/
+# The A/B routing primitives (Experiment, Variant) live in models/validation and
+# are imported by the serving path. Only that subpackage is copied, not all of
+# models/: it needs numpy alone at import time, while the training and
+# optimisation packages would drag in torch and CUDA. The scipy used for the
+# statistical comparisons is imported lazily inside the analysis functions,
+# which serving never calls.
+COPY --chown=app:app models/__init__.py ./models/
+COPY --chown=app:app models/validation/ ./models/validation/
+# Operational scripts. The scheduled maintenance and drift jobs run from this
+# image, so they need them; they are a few kilobytes of pure Python.
+COPY --chown=app:app scripts/ ./scripts/
 # Schema migrations. Applied by the one-shot `migrate` service in Compose,
 # never by the API's entrypoint: with several replicas that would mean N
 # processes racing to apply the same DDL.
