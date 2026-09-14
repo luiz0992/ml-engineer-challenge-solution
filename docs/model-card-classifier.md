@@ -111,9 +111,19 @@ large number of results that are correct 96% of the time. A caller wanting a
 ### Serving-path accuracy
 
 The production API reimplements preprocessing in NumPy so the serving container
-needs no torch. Verified on 2,000 randomly sampled validation images passed as
-raw JPEG bytes through the full API path: **85.35% top-1**, consistent with
-85.88% on the full split within sampling error.
+needs no torch, which means two independent implementations must agree.
+
+Measured on the **full 10,000-image validation split**, passed as raw bytes
+through the serving preprocessing and the exported ONNX graph: **85.78%
+top-1**, against 85.88% from the training loop. The 0.10pp difference is
+attributable to floating-point ordering between the two preprocessing
+implementations, which agree to 7.2e-07 per pixel.
+
+That agreement is asserted by
+`tests/unit/test_image_processing.py::TestTorchvisionEquivalence` across eight
+input shapes, and is the only thing preventing the two implementations from
+drifting apart — see the write-up's discussion of the two silent preprocessing
+bugs found that way.
 
 ### Latency
 

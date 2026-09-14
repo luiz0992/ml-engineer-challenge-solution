@@ -1500,6 +1500,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-mock" },
     { name = "ruff" },
+    { name = "scipy" },
     { name = "testcontainers", extra = ["redis"] },
     { name = "types-requests" },
 ]
@@ -1571,6 +1572,7 @@ requires-dist = [
     { name = "requests", marker = "extra == 'train'", specifier = ">=2.32" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "scikit-learn", marker = "extra == 'train'", specifier = ">=1.5" },
+    { name = "scipy", marker = "extra == 'dev'", specifier = ">=1.14" },
     { name = "scipy", marker = "extra == 'train'", specifier = ">=1.14" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
     { name = "structlog", specifier = ">=24.4" },

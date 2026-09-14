@@ -72,9 +72,20 @@ class TestDisabledService:
         assert service.stats.queued == 0
 
     async def test_start_and_stop_are_safe(self) -> None:
+        """Lifecycle calls must be no-ops, not errors, with no database.
+
+        The API calls start() and stop() unconditionally, so a disabled audit
+        service raising here would fail startup for a component that is
+        explicitly optional.
+        """
         service = AuditService(None)
+
         await service.start()
         await service.stop()
+
+        # No background task was created, and no work was recorded.
+        assert service._task is None
+        assert service.stats.written == 0
 
 
 class TestBuffering:

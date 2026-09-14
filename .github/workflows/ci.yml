@@ -116,6 +116,22 @@ jobs:
           uv run alembic downgrade base
           uv run alembic upgrade head
 
+      - name: Verify no test is silently skipped
+        # A skipped test reads as a pass in the summary. Any skip that is not
+        # an explicitly-allowed one (missing model artifacts, which are not
+        # committed) means coverage quietly disappeared.
+        run: |
+          set -euo pipefail
+          output=$(uv run pytest tests/ -q -rs --no-cov 2>&1 || true)
+          echo "$output"
+          unexpected=$(echo "$output" | grep "^SKIPPED" | grep -v "artifacts not found" \
+            | grep -v "Tiny-ImageNet not found" | grep -v "require torchvision" || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::Unexpected skipped tests:"
+            echo "$unexpected"
+            exit 1
+          fi
+
       - name: Run tests
         run: |
           uv run pytest \
@@ -135,6 +151,46 @@ jobs:
             coverage.xml
             junit.xml
           retention-days: 14
+
+  preprocessing-equivalence:
+    name: Preprocessing equivalence
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install with the training stack
+        # A separate job because torch is ~2.5 GB and the rest of the suite
+        # does not need it. It runs here rather than nowhere because
+        # `pytest.importorskip("torch")` silently skips the whole module in the
+        # main test job -- including TestTorchvisionEquivalence, which is the
+        # only thing preventing the serving preprocessing from drifting away
+        # from the training transform. Two silent accuracy bugs were found that
+        # way; a skipped guard is no guard.
+        run: uv sync --extra dev --extra train --frozen
+
+      - name: Run equivalence tests
+        run: |
+          uv run pytest tests/unit/test_image_processing.py -v
+
+      - name: Fail if the equivalence tests were skipped
+        # The point of this job is that these tests actually execute. A skip
+        # here would restore exactly the gap it exists to close, and would look
+        # like a pass.
+        run: |
+          set -euo pipefail
+          output=$(uv run pytest tests/unit/test_image_processing.py -q -rs 2>&1)
+          echo "$output"
+          if echo "$output" | grep -qi "skipped"; then
+            echo "::error::Preprocessing equivalence tests were skipped, not run."
+            exit 1
+          fi
 
   model-quality:
     name: Model regression gate

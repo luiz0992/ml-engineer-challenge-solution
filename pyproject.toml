@@ -100,6 +100,11 @@ dev = [
     "fakeredis[lua]>=2.26",
     "testcontainers[postgres,redis]>=4.8",
     "locust>=2.32",
+    # models/validation uses scipy for the KS test and the t-tests. It is not a
+    # serving dependency -- the analysis functions import it lazily and the API
+    # never calls them -- but the tests do, so a dev install without it leaves
+    # 18 tests failing in a clean checkout and in CI.
+    "scipy>=1.14",
     "ruff>=0.8",
     "mypy>=1.13",
     "types-requests",

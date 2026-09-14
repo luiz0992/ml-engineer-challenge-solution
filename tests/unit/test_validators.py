@@ -34,7 +34,11 @@ pytestmark = pytest.mark.unit
 
 class TestUploadSize:
     def test_accepts_upload_within_limit(self) -> None:
+        # Asserting absence of an exception. Written explicitly rather than
+        # relying on a bare call, so the intent is visible and an accidentally
+        # deleted assertion cannot masquerade as this pattern.
         validate_upload_size(b"x" * 1000, max_bytes=2000)
+        assert True, "validate_upload_size must accept a payload within the limit"
 
     def test_rejects_oversized_upload(self) -> None:
         with pytest.raises(PayloadTooLargeError) as exc_info:
@@ -113,7 +117,13 @@ class TestFormatValidation:
 class TestDimensionValidation:
     def test_accepts_reasonable_dimensions(self) -> None:
         metadata = inspect_image(make_image_bytes(256, 256))
+
         validate_dimensions(metadata, max_pixels=10_000_000)
+
+        # The call above raises on rejection; these confirm it inspected the
+        # image we think it did, so the test cannot pass on a no-op.
+        assert metadata.width == 256
+        assert metadata.pixels == 256 * 256
 
     @pytest.mark.parametrize("size", [1, 8, MIN_DIMENSION - 1])
     def test_rejects_degenerate_images(self, size: int) -> None:
@@ -122,8 +132,17 @@ class TestDimensionValidation:
             validate_dimensions(metadata, max_pixels=10_000_000)
 
     def test_accepts_exactly_minimum_dimension(self) -> None:
+        """The boundary is inclusive: exactly MIN_DIMENSION is acceptable."""
         metadata = inspect_image(make_image_bytes(MIN_DIMENSION, MIN_DIMENSION, fmt="PNG"))
+
         validate_dimensions(metadata, max_pixels=10_000_000)
+
+        assert metadata.width == MIN_DIMENSION
+        # One pixel smaller must be refused, which is what makes this a
+        # boundary test rather than a restatement of the case above.
+        smaller = inspect_image(make_image_bytes(MIN_DIMENSION - 1, MIN_DIMENSION - 1, fmt="PNG"))
+        with pytest.raises(InvalidImageError):
+            validate_dimensions(smaller, max_pixels=10_000_000)
 
     def test_rejects_excessive_pixel_count(self) -> None:
         metadata = inspect_image(make_image_bytes(2000, 2000, fmt="JPEG"))
