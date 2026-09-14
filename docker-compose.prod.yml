@@ -1,0 +1,217 @@
+# Production overlay.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Applied on top of the base file. It changes what genuinely differs in
+# production rather than duplicating the whole stack, so the two cannot drift.
+#
+# What this overlay changes and why:
+#   - No bind mounts of source or config; everything ships in the image.
+#   - Secrets come from the environment or a secret store, never a file in the
+#     repository, and have no defaults. A missing secret fails the deploy.
+#   - Replicas and stricter resource limits.
+#   - Read-only root filesystems and dropped capabilities.
+#   - Prometheus and Grafana are not published to the host.
+
+name: ml-engineer-challenge
+
+x-prod-env: &prod-env
+  APP_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_FORMAT: json
+  # No defaults: `?` makes Compose refuse to start without them. A production
+  # deploy that silently falls back to a development credential is worse than
+  # one that fails loudly.
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY is required in production}
+  POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+  POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  ARTIFACTS_DIR: /app/models/artifacts
+  INFERENCE_BACKEND: ${INFERENCE_BACKEND:-onnx}
+
+x-security: &hardened
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  api-gateway:
+    ports:
+      - "${GATEWAY_PORT:-80}:80"
+    <<: *hardened
+    cap_add:
+      # nginx binds port 80 and drops privileges to the `nginx` user itself.
+      - CHOWN
+      - SETGID
+      - SETUID
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      # nginx writes its pid and proxy scratch files; a read-only root needs
+      # these to be explicitly writable.
+      - /var/run
+      - /var/cache/nginx
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+    restart: always
+
+  ml-api:
+    environment: *prod-env
+    # Artifacts come from a named volume populated by the deployment pipeline,
+    # not a bind mount of the working tree.
+    volumes:
+      - model-artifacts:/app/models/artifacts:ro
+    <<: *hardened
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      # Several replicas behind the gateway. The application holds no
+      # per-request state, so scaling out needs no coordination.
+      replicas: ${API_REPLICAS:-3}
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4G
+        reservations:
+          cpus: "1.0"
+          memory: 2G
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        # Rolling: one replica at a time, and roll back automatically if the
+        # new one never becomes healthy.
+        parallelism: 1
+        delay: 20s
+        order: start-first
+        failure_action: rollback
+    restart: always
+    # container_name cannot be used with replicas; Compose assigns names.
+    container_name: !reset null
+
+  worker:
+    environment: *prod-env
+    volumes:
+      - model-artifacts:/app/models/artifacts:ro
+    <<: *hardened
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 6G
+        reservations:
+          cpus: "1.0"
+          memory: 2G
+      restart_policy:
+        condition: any
+        delay: 10s
+    restart: always
+    container_name: !reset null
+
+  redis:
+    command:
+      - redis-server
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-2gb}
+      - --maxmemory-policy
+      - allkeys-lru
+      # Persistence stays off: everything here is a cache or a transient job
+      # result, both reconstructible. Enabling AOF would add fsync latency to
+      # the hot path for data we are willing to lose.
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required in production}
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+    <<: *hardened
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G
+    restart: always
+
+  postgres:
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C --data-checksums"
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=3GB
+      # Log statements slower than a second, which is how a missing index is
+      # noticed before it becomes an incident.
+      - -c
+      - log_min_duration_statement=1000
+    <<: *hardened
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4G
+        reservations:
+          memory: 2G
+    restart: always
+
+  prometheus:
+    # Not published: metrics expose traffic volumes and error rates, and the
+    # Prometheus UI has no authentication. Reachable only inside the network,
+    # or through an authenticating reverse proxy.
+    ports: !reset []
+    <<: *hardened
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+    restart: always
+
+  grafana:
+    ports: !reset []
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?GRAFANA_PASSWORD is required}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_STRICT_TRANSPORT_SECURITY: "true"
+    <<: *hardened
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    restart: always
+
+volumes:
+  model-artifacts:
+    # Populated by the deployment pipeline, external so that redeploying the
+    # stack cannot destroy the model artifacts.
+    external: true
+    name: ${MODEL_ARTIFACTS_VOLUME:-mlchal-model-artifacts}

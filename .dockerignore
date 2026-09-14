@@ -1,0 +1,54 @@
+# Keep the build context small. Every file here would otherwise be sent to the
+# Docker daemon on each build and invalidate the layer cache when it changes.
+
+# --- Version control ------------------------------------------------------
+.git/
+.gitignore
+.github/
+
+# --- Virtual environments -------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# --- Datasets and model artifacts ----------------------------------------
+# Datasets are never needed in an image. Model artifacts are mounted as a
+# volume rather than baked in, so the same image can serve a new model version
+# without a rebuild, and the image stays small.
+data/
+models/artifacts/
+!models/artifacts/.gitkeep
+*.onnx
+*.safetensors
+*.pth
+*.pt
+*.engine
+
+# --- Experiment tracking --------------------------------------------------
+mlruns/
+*.db
+
+# --- Tooling caches -------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+.benchmarks/
+
+# --- Local state ----------------------------------------------------------
+.env
+.local/
+logs/
+*.log
+.DS_Store
+.ipynb_checkpoints/
+
+# --- Docs and reports -----------------------------------------------------
+# Not needed at runtime.
+docs/
+benchmarks/
+notebooks/

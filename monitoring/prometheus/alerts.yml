@@ -1,0 +1,104 @@
+# Alerting rules.
+#
+# Each alert states what a responder should do, not just that a threshold was
+# crossed. An alert without an action is noise, and noisy alerts get muted.
+#
+# Thresholds are grounded in the measured benchmarks in benchmarks/ANALYSIS.md:
+# single-image inference is ~1-9 ms, so a p95 above 500 ms means something is
+# badly wrong rather than merely busy.
+
+groups:
+  - name: availability
+    rules:
+      - alert: APIDown
+        expr: up{job="ml-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The API is not responding to scrapes"
+          description: >-
+            Prometheus cannot reach ml-api. Check `docker compose ps` and the
+            container logs. If the model failed to load, startup aborts by
+            design and the container will be restarting.
+
+      - alert: NoModelLoaded
+        expr: sum(model_loaded_info) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The API is running with no model loaded"
+          description: >-
+            Inference returns 503 in this state. Verify that the artifacts
+            volume is mounted and contains labels.json and onnx/.
+
+  - name: degradation
+    rules:
+      - alert: ModelRunningDegraded
+        expr: sum(model_loaded_info{degraded="true"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A model is serving on a fallback backend"
+          description: >-
+            The configured inference backend could not be initialised and the
+            service fell back. Inference is correct but slower. Check the
+            startup logs for `model_loaded_degraded`.
+
+      - alert: HighErrorRate
+        expr: >-
+          sum(rate(http_requests_total{status_code=~"5.."}[5m]))
+          / sum(rate(http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 5% of requests are failing with 5xx"
+          description: >-
+            Check the application logs for `unhandled_exception`. Client errors
+            (4xx) are excluded, so this reflects server-side faults only.
+
+      - alert: InferenceFailures
+        expr: >-
+          sum(rate(inference_requests_total{outcome="failure"}[5m]))
+          / sum(rate(inference_requests_total[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inference is failing for more than 1% of requests"
+          description: >-
+            Distinct from HTTP 5xx: this counts failures inside the model
+            runtime. A sustained rate usually means a backend has become
+            unusable since startup.
+
+  - name: latency
+    rules:
+      - alert: HighRequestLatency
+        expr: >-
+          histogram_quantile(
+            0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le, endpoint)
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 latency above 500 ms on {{ $labels.endpoint }}"
+          description: >-
+            Measured inference is 1-9 ms, so this indicates queueing, a CPU
+            fallback, or resource starvation rather than normal load. Compare
+            inference_duration_seconds against the HTTP latency to see whether
+            the time is inside the model or in front of it.
+
+      - alert: SaturatedRequestQueue
+        expr: sum(http_requests_in_progress) > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 100 requests in flight"
+          description: >-
+            The service is accepting faster than it can serve. Scale out the
+            API, or check whether inference has fallen back to CPU.

@@ -1,0 +1,15 @@
+# Load dashboard JSON from disk, so dashboards are version-controlled rather
+# than living only in Grafana's database where they are lost with the volume.
+apiVersion: 1
+
+providers:
+  - name: ml-api
+    orgId: 1
+    folder: ML API
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

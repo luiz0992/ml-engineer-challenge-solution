@@ -21,7 +21,84 @@ single authenticated, rate-limited, observable HTTP API.
 
 ## Architecture
 
-_TBD — added in Layer 7 alongside the Compose stack._
+```
+                    ┌──────────────┐
+   client ─────────▶│ api-gateway  │  nginx: per-IP rate limits, upload cap,
+                    │   (nginx)    │  security headers, /metrics denied
+                    └──────┬───────┘
+                           │ frontend network
+                    ┌──────▼───────┐
+                    │    ml-api    │  FastAPI: auth, validation, per-tier
+                    │   (uvicorn)  │  rate limits, ONNX inference
+                    └──┬────────┬──┘
+           backend ────┤        ├──── backend
+              ┌────────▼──┐  ┌──▼────────┐
+              │   redis   │  │ postgres  │
+              │ cache +   │  │ inference │
+              │  broker   │  │   logs    │
+              └─────┬─────┘  └───────────┘
+                    │ broker
+              ┌─────▼─────┐        ┌────────────┐     ┌──────────┐
+              │  worker   │        │ prometheus │────▶│ grafana  │
+              │ (celery)  │        │  + alerts  │     │dashboards│
+              └───────────┘        └────────────┘     └──────────┘
+```
+
+Networks are segmented: Postgres and Redis sit on `backend` only, so they are
+unreachable from anything exposed to the outside world. The API is not
+published to the host — traffic arrives through the gateway, which is also what
+enforces the `/metrics` deny rule.
+
+### Running the stack
+
+```bash
+cp .env.example .env          # set JWT_SECRET_KEY and POSTGRES_PASSWORD
+uv run python scripts/prepare_artifacts.py   # publish model artifacts
+docker compose up -d --build
+
+curl localhost:8080/api/v1/health
+```
+
+Services: `api-gateway`, `ml-api`, `worker`, `redis`, `postgres`, `prometheus`
+(`:9090`), `grafana` (`:3000`, admin/admin).
+
+Production overlay:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+The overlay adds replicas, read-only root filesystems, dropped capabilities,
+and removes the published Prometheus and Grafana ports. It has **no default
+secrets** — `JWT_SECRET_KEY`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, and
+`GRAFANA_PASSWORD` must be supplied or Compose refuses to start, so a
+production deploy cannot silently fall back to a development credential.
+
+### Image design
+
+One Dockerfile, two targets (`api` and `worker`) sharing a `runtime` stage, so
+dependency layers are built once. The serving image is 700 MB and contains
+**no torch, torchvision, or CUDA** — preprocessing is reimplemented in NumPy and
+Pillow precisely so the training stack can be left out. Both run as a non-root
+user (uid 1001), and model artifacts are mounted read-only rather than baked in,
+so a new model version needs no rebuild.
+
+### Troubleshooting
+
+**`Temporary failure resolving deb.debian.org` during build.** BuildKit cannot
+reach DNS on some Docker Desktop configurations, while `docker run` containers
+can. Build with the host network:
+
+```bash
+docker build --network=host --target api -t mlchal-api:latest .
+docker build --network=host --target worker -t mlchal-worker:latest .
+docker compose up -d --no-build
+```
+
+**GPU inference in containers.** The Compose stack runs ONNX Runtime on CPU
+(~170 ms per image). GPU passthrough needs `deploy.resources.reservations.devices`
+and the `onnxruntime-gpu` package in the image; see `benchmarks/ANALYSIS.md` for
+the measured difference.
 
 ## Results
 
@@ -169,6 +246,50 @@ the `correlation_id` to quote when reporting a problem.
            "details": {"supported_formats": ["BMP", "JPEG", "PNG", "WEBP"]},
            "correlation_id": "..."}}
 ```
+
+## Testing
+
+```bash
+scripts/test                 # unit + integration, coverage gate at 90%
+scripts/test --performance   # performance and memory suite
+scripts/test --fast          # skip coverage, for a tight edit loop
+scripts/lint --fix           # ruff + mypy
+```
+
+**243 tests, 95.06% statement coverage** of `api/`.
+
+| Suite | Count | Scope |
+| --- | ---: | --- |
+| Unit | 199 | Validation, preprocessing, auth, rate limiting, cache, model loading |
+| Integration | 44 | Full request path with a fake Redis and a synthetic model |
+| Performance | 9 | Latency, memory stability, concurrency, batching |
+
+Performance tests are excluded by default: they are slower and their thresholds
+depend on the host, so they belong in a deliberate run rather than in the loop a
+developer repeats every few minutes.
+
+Two testing decisions worth stating:
+
+**Redis is faked, not mocked.** `fakeredis` implements real Redis semantics
+including Lua evaluation, so the rate limiter's sliding-window script executes
+as written. A `MagicMock` would assert only that we call the methods we call,
+which proves nothing about whether the algorithm is correct. The atomicity test
+fires four times the quota concurrently and asserts exactly the limit is
+admitted — that test fails against a non-atomic implementation.
+
+**Tests do not depend on the 87 MB trained model.** A synthetic ONNX graph with
+the same interface is generated at session scope, so the suite runs in CI with
+no artifacts. Tests that genuinely need the trained model skip with a reason
+when it is absent.
+
+The most important single test is
+`tests/unit/test_image_processing.py::TestTorchvisionEquivalence`, which asserts
+the serving preprocessing matches the training transform to 7.2e-07 across eight
+input shapes. It exists because two real bugs were found that way, both silent:
+`v2.Resize` defaults to BILINEAR rather than BICUBIC, and `CenterCrop` rounds
+rather than floor-divides. Since the serving path deliberately reimplements
+preprocessing in NumPy so the production image needs no torch, that test is the
+only thing preventing the two implementations from drifting apart again.
 
 ## Project layout
 

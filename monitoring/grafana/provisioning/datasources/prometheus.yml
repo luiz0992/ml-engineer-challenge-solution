@@ -1,0 +1,15 @@
+# Provision Prometheus as the default datasource, so the stack comes up with
+# working dashboards rather than requiring manual setup after every `up`.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Must match prometheus.yml's scrape_interval, or Grafana's rate()
+      # windows will be narrower than the data and render gaps.
+      timeInterval: 15s

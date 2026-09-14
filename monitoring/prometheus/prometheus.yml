@@ -1,0 +1,27 @@
+# Prometheus scrape configuration.
+#
+# The API is scraped directly over the internal network rather than through the
+# gateway, which denies /metrics publicly. Scraping through the gateway would
+# also attribute every scrape to the gateway's rate-limit bucket.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: development
+    service: ml-engineer-challenge
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: ml-api
+    metrics_path: /api/v1/metrics
+    static_configs:
+      - targets: ["ml-api:8000"]
+        labels:
+          component: api
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
