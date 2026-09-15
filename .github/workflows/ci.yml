@@ -482,7 +482,7 @@ jobs:
           # docker job never runs `uv sync`, so importing PyYAML here would
           # depend on whatever the runner image happens to ship.
           JWT_SECRET_KEY=ci POSTGRES_PASSWORD=ci \
-            docker compose config --format json > /tmp/rendered.json
+            docker compose --env-file /dev/null config --format json > /tmp/rendered.json
           python - <<'PYTHON'
           import json, sys
 
@@ -508,24 +508,37 @@ jobs:
           PYTHON
 
       - name: Validate Compose configuration
+        # --env-file /dev/null on every invocation. Compose reads .env from the
+        # working directory by default, so a developer's untracked file silently
+        # supplies variables the production overlay demands -- this step passed
+        # locally and failed here on a missing POSTGRES_USER that .env had been
+        # providing all along.
         run: |
           set -euo pipefail
 
           JWT_SECRET_KEY=ci POSTGRES_PASSWORD=ci \
-            docker compose config --quiet
+            docker compose --env-file /dev/null config --quiet
           echo "Development stack is valid"
 
           # The production overlay must refuse to render without secrets. A
           # deploy that silently falls back to a development credential is the
           # failure this check exists to prevent.
-          if JWT_SECRET_KEY=ci POSTGRES_PASSWORD=ci \
-               docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-               config --quiet 2>/dev/null; then
+          #
+          # Everything *except* the two under test is supplied, so the refusal
+          # is attributable to them. Omitting more would make this pass for
+          # whichever variable happened to be missing first.
+          if JWT_SECRET_KEY=ci POSTGRES_PASSWORD=ci POSTGRES_USER=ci POSTGRES_DB=ci \
+               docker compose --env-file /dev/null \
+                 -f docker-compose.yml -f docker-compose.prod.yml \
+                 config --quiet 2>/dev/null; then
             echo "::error::The production overlay rendered without REDIS_PASSWORD or GRAFANA_PASSWORD"
             exit 1
           fi
           echo "Production overlay correctly requires its secrets"
 
-          JWT_SECRET_KEY=ci POSTGRES_PASSWORD=ci REDIS_PASSWORD=ci GRAFANA_PASSWORD=ci \
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+          JWT_SECRET_KEY=ci POSTGRES_PASSWORD=ci POSTGRES_USER=ci POSTGRES_DB=ci \
+          REDIS_PASSWORD=ci GRAFANA_PASSWORD=ci \
+            docker compose --env-file /dev/null \
+              -f docker-compose.yml -f docker-compose.prod.yml \
+              config --quiet
           echo "Production stack is valid when secrets are supplied"
