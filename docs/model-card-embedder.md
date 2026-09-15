@@ -48,7 +48,8 @@ recall; choosing approximation before exact search is too slow is premature.
 
 ## Performance
 
-Measured over **1,000 validation queries sampled across all 200 classes**
+Measured over **1,000 validation queries sampled at random from the validation
+split**, which covered 198 of the 200 classes
 against the 20,000-image training index. Queries come from validation and the
 index from training, so a query can never retrieve itself.
 
@@ -59,11 +60,11 @@ index from training, so a query can never retrieve itself.
 | Precision@10 | 78.7% |
 | Query latency | ~5 ms (ONNX Runtime, including embedding) |
 | Index size | 30 MB, 20,000 vectors |
-| Export fidelity | max abs. difference 2.7e-07 vs PyTorch |
+| Export fidelity | max abs. difference **2.682e-07** vs PyTorch ([measured](../benchmarks/export_fidelity.json)) |
 
 > **A correction.** An earlier version of this card reported 92% precision@5.
 > That figure came from five hand-picked classes and did not survive proper
-> measurement: across all 200 classes the real number is **79.7%**. The
+> measurement: across 1,000 random queries the real number is **79.7%**. The
 > original sample happened to contain visually distinctive categories. It is
 > recorded here because a cherry-picked benchmark that flatters the model is
 > exactly the kind of number that should not be trusted, including when it is
@@ -90,6 +91,31 @@ frame. Categories with distinctive colour and texture retrieve near-perfectly.
 
 **A caller should not assume uniform quality.** For a context-dependent
 category, retrieval is close to useless.
+
+### INT8 is built, measured, and not deployed
+
+Top-1 accuracy does not apply to a model with no classifier head, so the
+question is whether quantized vectors still rank neighbours the way FP32 ones
+do. They do not.
+
+| Metric | INT8 vs FP32 |
+| --- | ---: |
+| Mean cosine similarity | 0.717 |
+| recall@5 searching the FP32 index | **0.505** |
+| Artefact size | 87.8 -> 23.2 MB |
+
+Both numbers are needed. High cosine similarity alone would not be sufficient —
+a uniform rotation would preserve it while destroying retrieval — and recall@5
+measures the mixed FP32-index/INT8-query regime the service would actually run
+in. Rebuilding the index in INT8 would not rescue it: at 0.717 mean similarity
+the quantization noise is comparable to the distance between genuine
+neighbours.
+
+Latency does not justify it either. INT8 saves 1.1 ms at batch 1 on CPU
+(12.3 ms vs 13.4 ms), against 1.06 ms for TensorRT FP16 on GPU.
+
+Measured by `evaluate_embedding_fidelity`; raw numbers in
+`benchmarks/quantization.json`.
 
 ## Index construction
 

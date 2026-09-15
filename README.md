@@ -6,7 +6,7 @@ single authenticated, rate-limited, observable HTTP API.
 
 Three models served: image classification, object detection, and image
 similarity search. See
-[What is missing](docs/technical-writeup.md#8-what-is-missing-and-why) for an
+[What is still missing](docs/technical-writeup.md#12-what-is-still-missing) for an
 explicit list of remaining gaps.
 
 ---
@@ -17,7 +17,10 @@ explicit list of remaining gaps.
 - [Quick start](#quick-start)
 - [Project layout](#project-layout)
 - [Notes on the provided starter scripts](#notes-on-the-provided-starter-scripts)
-- [Design decisions](#design-decisions)
+- [Results](#results)
+- [Testing](#testing)
+- [Scripts](#scripts)
+- [Known limitations](#known-limitations)
 
 ---
 
@@ -61,8 +64,11 @@ docker compose up -d --build
 curl localhost:8080/api/v1/health
 ```
 
-Services: `api-gateway`, `ml-api`, `worker`, `redis`, `postgres`, `prometheus`
-(`:9090`), `grafana` (`:3000`, admin/admin).
+Twelve services. The ones you interact with: `api-gateway` (`:8080`), `ml-api`,
+`worker`, `redis`, `postgres`, `prometheus` (`:9090`), `grafana` (`:3000`,
+admin/admin), `alertmanager`. The rest run unattended: `migrate` applies
+migrations once at startup, `maintenance` and `drift` are scheduled jobs, and
+`pushgateway` collects metrics from those jobs.
 
 Production overlay:
 
@@ -109,7 +115,7 @@ docker compose run --rm migrate alembic downgrade -1   # roll back one
 ### Image design
 
 One Dockerfile, two targets (`api` and `worker`) sharing a `runtime` stage, so
-dependency layers are built once. The serving image is 700 MB and contains
+dependency layers are built once. The serving image is 701 MB and contains
 **no torch, torchvision, or CUDA** — preprocessing is reimplemented in NumPy and
 Pillow precisely so the training stack can be left out. Both run as a non-root
 user (uid 1001), and model artifacts are mounted read-only rather than baked in,
@@ -134,7 +140,8 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 ```
 
 The GPU overlay adds device reservations and installs `onnxruntime-gpu` plus
-TensorRT, taking inference from ~170 ms (CPU) to ~1 ms. It is a separate
+TensorRT, taking single-image classification from 15.9 ms (ONNX Runtime CPU in
+the container) to 1.05 ms (TensorRT FP16). It is a separate
 overlay because a Compose file that demands a GPU fails outright on a machine
 without one.
 
@@ -155,8 +162,9 @@ docker build --network=host --target worker -t mlchal-worker:latest .
 docker compose up -d --no-build
 ```
 
-**GPU inference in containers.** The Compose stack runs ONNX Runtime on CPU
-(~170 ms per image). GPU passthrough needs `deploy.resources.reservations.devices`
+**GPU inference in containers.** The Compose stack runs ONNX Runtime on CPU:
+measured in the running container, 15.9 ms per classification and 73 ms per
+detection. GPU passthrough needs `deploy.resources.reservations.devices`
 and the `onnxruntime-gpu` package in the image; see `benchmarks/ANALYSIS.md` for
 the measured difference.
 
@@ -174,7 +182,6 @@ single RTX 5000 Ada.
 | Validation loss | 0.5965 |
 | Training time | 7 min 4 s (5 epochs) |
 | Throughput | ~9.7 optimizer steps/s at batch 128 |
-| Peak GPU memory | 5.4 GiB |
 
 Measured over the full 10,000-image validation split. Accuracy improved
 monotonically across all five epochs with no divergence.
@@ -203,7 +210,7 @@ RT-DETR R18, Apache-2.0, used pretrained.
 | **mAP@[.5:.95]** | **0.500** (measured on COCO val2017) |
 | mAP@0.5 | 0.667 |
 | mAP small / large | 0.347 / 0.627 |
-| Latency (TensorRT FP16) | **1.4 ms** |
+| Latency (TensorRT FP16) | **2.14 ms** at batch 1, 1.04 ms/image at batch 8 |
 
 Evaluated with `pycocotools`, not quoted from the publication. The
 small-object gap of 0.280 is the model's real
@@ -224,7 +231,8 @@ over 20,000 training images.
 | Query latency | ~5 ms |
 | Embedding | 384-d, L2-normalised, cosine similarity |
 
-Measured over 1,000 validation queries across all 200 classes. Per-class
+Measured over 1,000 validation queries drawn at random from the validation
+split, which happened to cover 198 of the 200 classes. Per-class
 variation is large (19.2pp sd): context-defined categories like `pole` retrieve
 at 10%, distinctive ones near-perfectly.
 
@@ -263,6 +271,38 @@ assigned variant is recorded in the audit trail so the arms can be compared.
 An explicit `?model_version=` always overrides an experiment, and a malformed
 experiment degrades to the active version rather than failing requests.
 
+### Model versioning
+
+A version is resolved from the artefact layout, so shipping a second one is a
+deployment step rather than a code change:
+
+```
+models/artifacts/onnx/
+├── classifier_fp32.onnx          # v1, flat layout
+├── labels.json                   # (at the artifacts root)
+└── v2/
+    ├── classifier_fp32.onnx      # v2 weights
+    └── labels.json               # and v2's own class list
+```
+
+**A non-default version must be self-describing.** Its directory carries its
+own `labels.json`, so a `v2` built on a re-ordered or extended class list
+cannot be named from `v1`'s mapping — versioning the weights without
+versioning what they mean mislabels every prediction while the response, the
+audit row and the A/B analysis all agree.
+
+Every version present on disk is loaded at startup and registered, but **not**
+made active — a new version becomes reachable by pinning it or by an
+experiment, never by the mere act of shipping it. Callers pin with
+`?model_version=v2`, and the version that served is returned in `provenance`
+and written to the audit trail.
+
+**A pinned version that is not on disk fails rather than falling back.** That
+is the whole point of resolving through the layout: serving `v1`'s weights
+under `v2`'s name would make the response, the provenance block, the audit row,
+and the A/B analysis all agree on a version that never ran. The rollout
+procedure is in the [operations runbook](docs/operations.md#shipping-a-new-model-version).
+
 Drift uses PSI for categorical features and Kolmogorov-Smirnov for continuous
 ones, with **severity driven by effect size rather than p-value** — at
 production volumes a hypothesis test reports permanent drift. A/B comparisons
@@ -275,25 +315,75 @@ ViT-Small/16 at 224x224, batch 32, RTX 5000 Ada. Full matrix in
 [`benchmarks/README.md`](benchmarks/README.md); analysis and deployment
 recommendation in [`benchmarks/ANALYSIS.md`](benchmarks/ANALYSIS.md).
 
-| Backend | Latency | Throughput | Speedup | Top-1 |
-| --- | ---: | ---: | ---: | ---: |
-| PyTorch eager FP32 | 16.78 ms | 1,907 img/s | 1.00x | 87.25% |
-| PyTorch eager bf16 | 5.23 ms | 6,118 img/s | 3.21x | 87.25% |
-| **TensorRT FP16** | **3.49 ms** | **9,177 img/s** | **4.81x** | 87.25% |
+<!-- BEGIN:headline-latency -->
+<!-- Generated by scripts/sync_docs.py; edits here are overwritten. -->
 
-All three models have TensorRT engines: classifier 8,822 img/s, embedder
-9,006 img/s, detector 968 img/s (batch 8, at 8x the input pixels).
-| ONNX Runtime CPU INT8 | 475 ms | 67 img/s | 0.04x | 81.85% |
+| Backend | Latency | Throughput | Speedup |
+| --- | ---: | ---: | ---: |
+| PyTorch eager FP32 | 16.73 ms | 1,913 img/s | 1.00x |
+| PyTorch eager bf16 | 5.19 ms | 6,162 img/s | 3.22x |
+| **TensorRT FP16** | **3.51 ms** | **9,105 img/s** | **4.76x** |
+| ONNX Runtime CUDA FP32 | 18.94 ms | 1,689 img/s | 0.88x |
+| ONNX Runtime CPU INT8 | 460.80 ms | 69 img/s | 0.04x |
+
+<!-- END:headline-latency -->
+
+All three models have TensorRT engines: classifier 9,105 img/s and embedder
+9,192 img/s at batch 32, detector 965 img/s at batch 8 (it runs at 8x the
+input pixels, so large batches exhaust GPU memory before saturating compute).
 
 Single-image latency is 1.05 ms under TensorRT, three orders of magnitude
 inside the sub-second requirement.
 
-**INT8 is not recommended for this model.** It costs 5.4 points of top-1
-accuracy for a 1.3x CPU speedup. Getting even that required replacing ONNX
-Runtime's default min-max calibration, which cost 17.7 points, with percentile
-calibration — vision transformers produce rare LayerNorm and GELU outliers that
-destroy a min-max quantization range. See the analysis for the full calibration
-study.
+Accuracy is reported separately from latency because the two are measured on
+different splits. The headline **top-1 is 85.78%** on the full 10,000-image
+validation split (`benchmarks/evaluation.json`). The INT8 calibration study in
+[`benchmarks/ANALYSIS.md`](benchmarks/ANALYSIS.md) uses a fixed 2,000-image
+subset (87.25% FP32 -> 81.85% INT8); the subset figures are comparable to each
+other but are not the model's accuracy.
+
+**INT8 is built for all three models and recommended for none.** Each was
+quantized with the same pipeline and measured with the metric it is judged on:
+
+| Model | Metric | FP32 | INT8 | Change |
+| --- | --- | ---: | ---: | ---: |
+| Classifier | Top-1 | 87.25% | 81.85% | -5.40pp |
+| Detector | COCO mAP@[.5:.95] | 0.4999 | 0.0632 | -87% rel. |
+| Embedder | recall@5 vs FP32 index | 1.000 | 0.505 | -50% rel. |
+
+The detector's small-object AP falls to *exactly zero* — box regression has
+none of the margin a classifier's argmax enjoys — and it keeps emitting ~246k
+detections, so it fails confidently rather than silently. Reaching even -5.4pp
+on the classifier required replacing ONNX Runtime's default min-max
+calibration, which cost 17.7 points, with percentile calibration: vision
+transformers produce rare LayerNorm and GELU outliers that destroy a min-max
+range. Full study in [`benchmarks/ANALYSIS.md`](benchmarks/ANALYSIS.md) §2.
+
+### Memory footprint
+
+Measured by `scripts/profile_memory.py` on a CUDA host; full report in
+[`benchmarks/memory.md`](benchmarks/memory.md).
+
+| Component | Resident |
+| --- | ---: |
+| ONNX Runtime + CUDA context (one-time) | 839.5 MB |
+| Classifier | 79.0 MB |
+| Detector | 226.5 MB |
+| Embedder | 87.6 MB |
+| **Total, all three models loaded** | **1303 MB** |
+
+Two things worth stating. **The runtime dominates**: CUDA context and cuDNN
+kernels cost more than twice the combined model weights, and that cost is paid
+once regardless of how many models are resident. Sizing a container from the
+260 MB of model files alone would under-provision it fivefold. This is also why the default
+serving image is CPU-only — the CUDA stack is opt-in via
+`docker-compose.gpu.yml`.
+
+**Per-request memory is flat in upload size.** Peak Python allocation is
+1.79 MB (p95 1.80 MB) and does not move between a 224x224 and a 2048x2048
+upload, because the image is resized before anything else touches it. A peak
+that tracked the upload would make a large image a memory-exhaustion vector
+rather than a validation concern; two performance tests assert it stays flat.
 
 **Why training loss stays near 2.1 while validation loss is 0.60.** These are
 not the same quantity. Training loss is measured against MixUp/CutMix-mixed
@@ -322,7 +412,8 @@ uv sync --extra train         # adds torch/CUDA, only needed for training
 
 ## API
 
-Six endpoints under `/api/v1`, plus unprefixed probes for orchestrators.
+Eleven paths under `/api/v1`. The health and metrics endpoints are also
+mounted unprefixed, so orchestrator probes need not know the API version.
 
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
@@ -395,13 +486,54 @@ scripts/test --fast          # skip coverage, for a tight edit loop
 scripts/lint --fix           # ruff + mypy
 ```
 
-**243 tests, 95.06% statement coverage** of `api/`.
+**431 tests, 91.6% combined statement and branch coverage** of `api/`. CI gates
+at 90%.
 
 | Suite | Count | Scope |
 | --- | ---: | --- |
-| Unit | 199 | Validation, preprocessing, auth, rate limiting, cache, model loading |
-| Integration | 44 | Full request path with a fake Redis and a synthetic model |
-| Performance | 9 | Latency, memory stability, concurrency, batching |
+| Unit | 344 | Validation, preprocessing, auth, rate limiting, cache, model loading |
+| Integration | 75 | Full request path with a fake Redis and a synthetic model, plus database operations against a real Postgres |
+| Performance | 12 | Latency, memory profiling, concurrency, batching |
+
+Most of the suite runs against fakes — `fakeredis` with real Lua semantics, a
+synthetic ONNX graph — because they are faithful and fast. The database is the
+exception: `tests/integration/test_database.py` runs against a real Postgres
+(supplied by CI, or started with testcontainers locally, or skipped if neither
+is available). Timezone handling, partial indexes, and a write that fails
+*slowly* cannot be observed against a stand-in, and the third of those turned
+out to matter — see [the audit-shutdown
+bug](docs/technical-writeup.md#a-batch-lost-between-the-queue-and-the-database).
+
+### Load and stress testing
+
+```bash
+docker compose up -d
+uv run locust -f tests/performance/locustfile.py --host http://localhost:8080 \
+    --headless --users 50 --spawn-rate 5 --run-time 2m
+```
+
+Three profiles: `ClassificationUser` (the dominant pattern, with think time),
+`BatchUser` (submit-and-poll), and `FreeTierUser` (saturates the rate limiter
+to confirm rejection stays cheap and carries `Retry-After`). The run exits
+non-zero if the failure ratio exceeds 1% or p95 exceeds 2 s, so CI can gate on
+it.
+
+A measured run against the full Compose stack is committed:
+[`benchmarks/load-test.md`](benchmarks/load-test.md) — 1,361 requests through
+the nginx gateway at 20 concurrent users, **zero failures**, `/classify` p50
+23 ms and p95 67 ms, `/detect` p50 96 ms. Every percentile is an order of
+magnitude inside the sub-second requirement, and the cache is worth about 8x
+(3 ms against 23 ms).
+
+### Memory profiling
+
+```bash
+uv run python scripts/profile_memory.py
+```
+
+Writes `benchmarks/memory.json` and `benchmarks/memory.md`: resident cost per
+model, peak allocation per request, where allocations are retained, and how
+peak scales with upload size. See [results](#memory-footprint).
 
 Performance tests are excluded by default: they are slower and their thresholds
 depend on the host, so they belong in a deliberate run rather than in the loop a
@@ -423,7 +555,7 @@ when it is absent.
 
 The most important single test is
 `tests/unit/test_image_processing.py::TestTorchvisionEquivalence`, which asserts
-the serving preprocessing matches the training transform to 7.2e-07 across eight
+the serving preprocessing matches the training transform to 7.2e-07 across seven
 input shapes. It exists because two real bugs were found that way, both silent:
 `v2.Resize` defaults to BILINEAR rather than BICUBIC, and `CenterCrop` rounds
 rather than floor-divides. Since the serving path deliberately reimplements
@@ -434,22 +566,48 @@ only thing preventing the two implementations from drifting apart again.
 
 ```
 api/          FastAPI application (routers, services, middleware, schemas)
+models/       Dataset pipelines, training, optimisation, model validation
 worker/       Celery application and batch inference tasks
-ml/           Dataset pipelines, training, optimisation, model validation
-worker/       Celery tasks for batch inference
 tests/        Unit, integration, and performance suites
-monitoring/   Prometheus scrape config and Grafana dashboards
-docker/       Dockerfiles and nginx gateway configuration
+monitoring/   Prometheus scrape config, alert rules, Grafana dashboards
+deploy/       Kubernetes manifests
+docker/       nginx gateway configuration (the Dockerfile is at the repo root)
 scripts/      Dataset download and operational utilities
 benchmarks/   Generated performance comparison reports
 docs/         Model cards and the technical write-up
 ```
 
+## Scripts
+
+Every measurement quoted in this repository is produced by one of these, and
+each writes its output under `benchmarks/` so the claim can be re-derived
+rather than trusted.
+
+| Script | Produces |
+| --- | --- |
+| `scripts/setup/download_datasets.py` | Tiny-ImageNet and a COCO val2017 subset |
+| `scripts/prepare_artifacts.py` | ONNX exports, INT8 quantization, label metadata |
+| `scripts/build_similarity_index.py` | The FAISS index backing `/api/v1/similar` |
+| `scripts/evaluate_models.py` | `benchmarks/evaluation.json` — per-class accuracy, calibration, retrieval |
+| `scripts/evaluate_detector.py` | `benchmarks/detection_eval*.json` — COCO mAP, off-distribution probe |
+| `scripts/verify_exports.py` | `benchmarks/export_fidelity.json` — ONNX-vs-PyTorch agreement |
+| `scripts/profile_memory.py` | `benchmarks/memory.{json,md}` — resident cost, peak allocation |
+| `scripts/check_regression.py` | Gates a run against the committed baseline; exits non-zero on regression |
+| `scripts/analyse_drift.py` | PSI and KS over the audit trail; pushes gauges to Pushgateway |
+| `scripts/maintain_partitions.py` | Creates and drops audit partitions |
+| `scripts/sync_docs.py` | Regenerates the benchmark tables embedded in the docs; `--check` in CI |
+
+Plus `models/optimisation/run_benchmarks.py` for the latency matrix and
+`tests/performance/locustfile.py` for load.
+
+Operational usage — deploying, scaling, shipping a model version, responding to
+an alert — is in the [operations runbook](docs/operations.md).
+
 ## Notes on the provided starter scripts
 
 The challenge repository ships helper scripts under `scripts/`. Two contain
 defects that would corrupt results if used as-is, so this project supplies
-corrected implementations under `ml/` and documents the originals here.
+corrected implementations under `models/` and documents the originals here.
 
 ### 1. `download_datasets.py` cannot run
 
@@ -476,8 +634,23 @@ filename to its class. `ImageFolder` consequently discovers exactly one class
 (`images`) and assigns label `0` to all 10,000 validation images.
 
 This fails *silently* — it raises no error, and reported validation accuracy
-becomes meaningless. `ml/data/` restructures the validation split into proper
+becomes meaningless. `models/data/` restructures the validation split into proper
 per-class directories before loading.
+
+## Known limitations
+
+The full list, with reasoning, is in
+[technical write-up §12](docs/technical-writeup.md#12-what-is-still-missing).
+The ones worth knowing before you read the results:
+
+| Limitation | Detail |
+| --- | --- |
+| INT8 is built for all three models and deployed for none | Quantization is applied and measured per model. It costs the classifier 5.4pp of top-1, the detector 87% of its mAP (small-object AP falls to exactly zero), and the embedder half its top-5 retrieval. Serving runs FP32 ONNX with TensorRT FP16 engines. See [`benchmarks/ANALYSIS.md`](benchmarks/ANALYSIS.md) §2. |
+| The embedder is not a third network | It is the fine-tuned classifier backbone with the head removed. Cheap to serve and honest about it, but a purpose-trained metric-learning model would retrieve better. |
+| Detector accuracy off-distribution | Unmeasured — mAP needs annotations no other dataset here provides. Its failure *mode* is characterised: it abstains rather than hallucinating. |
+| Alert delivery endpoints | Routing, grouping, and inhibition are configured and validated with `amtool`. The webhook and PagerDuty keys belong in a secret manager, not a repository. |
+| Kubernetes manifests not applied to a live cluster | Validated against real 1.30 API schemas with `kubeconform --strict` (10/10 resources), which is a smaller claim than "deployed and working". |
+| Only one model version is built | Versioning is resolved from the artefact layout and a second version needs no code change, but the pipeline produces `v1` only. There is no second set of weights in this repository to demonstrate a live rollout against. |
 
 ## Documentation
 
@@ -488,26 +661,50 @@ development and how each was caught.
 | Document | Contents |
 | --- | --- |
 | [Technical write-up](docs/technical-writeup.md) | Model selection, optimisation results, architecture decisions, scalability, and an explicit list of gaps |
+| [Operations runbook](docs/operations.md) | Deploying, scaling, shipping a model version, running an experiment, alert responses |
 | [Model card: classifier](docs/model-card-classifier.md) | Metrics, training procedure, limitations, ethical considerations |
 | [Model card: detector](docs/model-card-detector.md) | RT-DETR provenance, licensing rationale, limitations |
+| [Model card: embedder](docs/model-card-embedder.md) | Retrieval quality, index construction, a published correction |
 | [Benchmark results](benchmarks/README.md) | Generated latency matrix across backends |
 | [Benchmark analysis](benchmarks/ANALYSIS.md) | Interpretation and deployment recommendation |
+| [Load test](benchmarks/load-test.md) | End-to-end latency through the full stack under concurrency |
+| [Memory profile](benchmarks/memory.md) | Resident cost per model, peak allocation per request |
 | [OpenAPI spec](docs/openapi.json) | Exported schema; also served live at `/openapi.json` |
 | [Documentation index](docs/README.md) | All results in one place, and what is not done |
 
-Four silent bugs found during development — two preprocessing defects, a
-backend that created a working session but could not infer, and a metrics
-mislabelling that made every dashboard useless — are written up in
-[section 4](docs/technical-writeup.md#4-four-bugs-worth-reporting).
+Eleven silent bugs found during development are written up in
+[section 4](docs/technical-writeup.md#4-eleven-bugs-worth-reporting):
+
+- two preprocessing defects that shifted every activation and crop;
+- a backend that created a working session and then failed every inference;
+- a metrics mislabelling that made every dashboard panel useless;
+- a container that could not see its own CPU limit and ran **8x slow**;
+- an audit writer that lost the batch it was committing on every shutdown;
+- version pinning that served `v1`'s weights under `v2`'s name;
+- a drift job that could not import the library its only test needs;
+- a provider check that skipped itself in the one case it existed for,
+  reporting `backend=tensorrt` while running on CPU;
+- versioned weights served with another version's labels;
+- a cache that could fail a request it was meant to accelerate.
+
+Four of the last five were found by running the system rather than testing it
+— `docker compose up` and a stopwatch, a real Postgres instead of a fake, a
+populated database that let the drift job reach its own test, and an artefact
+layout that made the versioning claim checkable.
 
 ## Continuous integration
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs four jobs: lint and
-type-check; tests against real Postgres and Redis services with a 90% coverage
-gate and a migration up/down/up cycle; a dependency and secret scan; and a
-Docker build that asserts the image runs as non-root, stays under 1.5 GB,
-contains no torch, and that the production Compose overlay refuses to render
-without its secrets.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs seven jobs:
+
+| Job | What it guards |
+| --- | --- |
+| `lint` | ruff check, ruff format, mypy across `api models worker scripts tests` |
+| `test` | Real Postgres and Redis services, 90% coverage gate, migration up/down/up, and a check that no test skipped unexpectedly |
+| `preprocessing-equivalence` | Installs torch so the serving-vs-training equivalence test actually runs, and fails if it skips |
+| `model-quality` | Validates the committed baseline, then gates on metric regressions |
+| `docs-contract` | Fails if `docs/openapi.json` or the generated benchmark tables have drifted |
+| `security` | `pip-audit` (advisory) and a blocking secret scan |
+| `docker` | Builds both images and asserts non-root, no torch, under 1.5 GB, plus kubeconform / promtool / amtool / Compose validation |
 
 ## Licence
 

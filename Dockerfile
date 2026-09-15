@@ -156,3 +156,37 @@ CMD ["celery", "-A", "worker.celery_app", "worker", \
      "--loglevel=info", \
      "--concurrency=2", \
      "--max-tasks-per-child=100"]
+
+
+# ---------------------------------------------------------------------------
+# Scheduled jobs
+# ---------------------------------------------------------------------------
+# `scripts/analyse_drift.py` runs a two-sample Kolmogorov-Smirnov test, which
+# needs scipy. The API never calls it -- `models/validation` imports scipy
+# lazily and nothing on the serving path reaches that import -- so putting
+# scipy in the runtime layer would add ~160 MB to every API and worker replica
+# for a dependency only a nightly batch job uses (701 MB -> 863 MB, measured).
+#
+# This was not hypothetical. The drift job shipped on the API image and crashed
+# with ModuleNotFoundError the first time it had enough data in both windows to
+# reach the KS test; until then it exited early on an empty baseline and looked
+# like it was working.
+FROM runtime AS jobs
+
+# uv rather than pip: the virtualenv is uv-created and carries no pip, and
+# this keeps resolution consistent with every other layer.
+COPY --from=ghcr.io/astral-sh/uv:0.9.6 /uv /usr/local/bin/uv
+
+# Installed as `app`, not root. The venv was copied in with --chown=app:app, so
+# no privilege escalation and no `chown -R` are needed -- and that matters more
+# than it looks: a recursive chown rewrites the metadata of every file in the
+# venv, so the layer captures a full copy of it. Doing that here took the image
+# to 1.43 GB instead of 863 MB -- a 570 MB duplicate of the venv, for a
+# dependency worth 162 MB.
+RUN --mount=type=cache,target=/home/app/.cache/uv,uid=1001,gid=1001 \
+    uv pip install --python /build/.venv/bin/python "scipy>=1.14"
+
+# No HEALTHCHECK: these are batch jobs, and the Compose services that run them
+# disable health checking explicitly rather than inheriting a probe that would
+# report a sleeping scheduler as unhealthy.
+CMD ["python", "-m", "scripts.maintain_partitions", "--push-metrics"]

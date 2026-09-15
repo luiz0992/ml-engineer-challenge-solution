@@ -38,9 +38,12 @@ embedded. RT-DETR is Apache-2.0 in both its implementation and its published
 weights. The challenge names DETR explicitly.
 
 **R18 rather than R101.** 20M parameters against 76M, and roughly a quarter of
-the latency. COCO mAP is 46.5 against 54.3. For a demonstration API where
-classification is the primary workload, the accuracy is not worth 4× the
-compute.
+the latency. The *published* COCO mAP for the two backbones is 46.5 against
+54.3 — those are the figures the selection was made on, and are distinct from
+the 0.500 measured here (see Performance below, which uses the
+Objects365-pretrained checkpoint on a 1,000-image subset). For a demonstration
+API where classification is the primary workload, the accuracy difference is
+not worth 4× the compute.
 
 **It exports cleanly.** RT-DETR is anchor-free and NMS-free: it predicts a fixed
 set of 300 queries with a one-to-one assignment loss, so duplicates are
@@ -81,21 +84,67 @@ the headline figure.
 
 | Backend | Batch 1 | Batch 8 |
 | --- | ---: | ---: |
-| ONNX Runtime CPU | 67.6 ms | 557.6 ms |
-| ONNX Runtime CUDA | 3.9 ms | 29.4 ms |
-| **TensorRT FP16** | **1.4 ms** | **8.3 ms** |
+| ONNX Runtime CPU FP32 | 54.1 ms | 537.4 ms |
+| ONNX Runtime CPU INT8 | 62.9 ms | 496.9 ms |
+| ONNX Runtime CUDA | 3.7 ms | 29.2 ms |
+| **TensorRT FP16** | **2.1 ms** | **8.3 ms** |
 
-TensorRT gives 2.9x over the CUDA provider. Batches above 8 are not benchmarked:
+TensorRT gives 1.7x over the CUDA provider. Batches above 8 are not benchmarked:
 at 640x640 a detection input is roughly eight times the pixels of a 224x224
 classification input, so large batches exhaust GPU memory long before they
 saturate compute.
 
-Export fidelity: max absolute difference 3.6e-06 against PyTorch. Artefact size
-84.3 MB.
+Export fidelity: max absolute difference **3.610e-06** against PyTorch,
+re-measured against the committed artefact by `scripts/verify_exports.py` and
+recorded in [`benchmarks/export_fidelity.json`](../benchmarks/export_fidelity.json).
+Artefact size 84.3 MB.
+
+### INT8 is built, measured, and not deployed
+
+| Metric | FP32 | INT8 |
+| --- | ---: | ---: |
+| mAP@[.5:.95] | 0.4999 | **0.0632** |
+| mAP@0.5 | 0.6674 | 0.0880 |
+| mAP small | 0.3469 | **0.0000** |
+| mAP medium | 0.5163 | 0.0240 |
+| mAP large | 0.6271 | 0.1490 |
+| Artefact size | 84.3 MB | 24.6 MB |
+
+Quantization destroys this model: 87% of its mAP, and **no small object is
+detected at all**. Detection is dominated by box regression, which has none of
+the margin a classifier's argmax enjoys — quantization noise is roughly
+constant in absolute pixels, so it is proportionally fatal for the smallest
+boxes and merely severe for the largest. That monotonic small-to-large gradient
+is the signature of coordinate noise rather than bad calibration.
+
+It also fails *confidently*: the quantized model still emits ~246k detections
+against FP32's ~250k, so nothing downstream can tell that the boxes are wrong.
+INT8 is additionally **slower** than FP32 at batch 1 (62.9 ms vs 54.1 ms).
+
+Measured with `scripts/evaluate_detector.py --model detector_int8.onnx`; raw
+numbers in `benchmarks/detection_eval_int8.json`.
 
 Functional verification on COCO `000000039769` (two cats on a couch with two
-remotes): all six objects detected at 0.74–0.95 confidence, every box inside the
-image bounds.
+remotes). Six detections above 0.5, at 0.763–0.950 confidence, every box inside
+the image bounds:
+
+| Score | Label | Box |
+| ---: | --- | --- |
+| 0.950 | cat | (344, 25, 640, 372) |
+| 0.949 | cat | (11, 56, 316, 472) |
+| 0.925 | remote | (41, 73, 175, 117) |
+| 0.860 | remote | (334, 76, 371, 188) |
+| 0.850 | sofa | (0, 0, 640, 479) |
+| 0.763 | sofa | (0, 0, 640, 479) |
+
+Six detections, but **not** the six ground-truth objects: the annotation lists
+`cat, cat, remote, remote, couch, bed`, and the model returns the couch twice
+while missing the bed entirely. Worth recording for two reasons. The duplicate
+is a near-exact repeat of the same whole-image box, which is mildly surprising
+for an NMS-free architecture whose one-to-one assignment loss is supposed to
+suppress exactly this. And the matching count is a coincidence — reading "six
+detections" as "six objects found" is the kind of eyeball verification that
+looks like evidence and is not. The measured claim is the mAP above.
 
 ## Preprocessing
 

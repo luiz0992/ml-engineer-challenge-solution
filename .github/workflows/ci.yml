@@ -120,6 +120,12 @@ jobs:
         # A skipped test reads as a pass in the summary. Any skip that is not
         # an explicitly-allowed one (missing model artifacts, which are not
         # committed) means coverage quietly disappeared.
+        #
+        # The database tests are deliberately *not* allowed to skip here. This
+        # job supplies a real Postgres as a service container, so a skip means
+        # they failed to connect to it rather than that the environment cannot
+        # support them -- and those tests are the ones that found the audit
+        # shutdown bug.
         run: |
           set -euo pipefail
           output=$(uv run pytest tests/ -q -rs --no-cov 2>&1 || true)
@@ -129,6 +135,19 @@ jobs:
           if [ -n "$unexpected" ]; then
             echo "::error::Unexpected skipped tests:"
             echo "$unexpected"
+            exit 1
+          fi
+
+      - name: Verify the database tests ran against real Postgres
+        # Belt and braces: the check above catches a skip, this catches the
+        # tests disappearing entirely (a renamed file, a bad marker).
+        run: |
+          set -euo pipefail
+          collected=$(uv run pytest tests/integration/test_database.py -q --collect-only \
+            --no-cov 2>&1 | tail -2 | head -1)
+          echo "$collected"
+          if echo "$collected" | grep -q "no tests ran\|0 tests collected"; then
+            echo "::error::The database integration tests did not run"
             exit 1
           fi
 
@@ -239,6 +258,55 @@ jobs:
             echo "The gate runs where the training pipeline has produced artefacts."
           fi
 
+  docs-contract:
+    name: Docs and API contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev --frozen
+
+      - name: Verify the benchmark figures in the docs match the data
+        # The headline latency table is generated from benchmarks/results.json
+        # into marked blocks. Hand-copied numbers went stale within a single
+        # re-run of the sweep, across five documents at once; this makes that
+        # a build failure instead of something a reader finds.
+        run: uv run python scripts/sync_docs.py --check
+
+      - name: Verify the committed OpenAPI spec is current
+        # `docs/openapi.json` is a deliverable that readers and client
+        # generators consume. A spec that has drifted from the code documents
+        # an API that no longer exists, and nothing else would notice.
+        env:
+          JWT_SECRET_KEY: ci-only-not-a-real-secret-0123456789abcdef
+        run: |
+          set -euo pipefail
+          uv run python - <<'PYTHON'
+          import json
+          from pathlib import Path
+
+          from api.main import create_app
+
+          current = create_app().openapi()
+          committed = json.loads(Path("docs/openapi.json").read_text())
+
+          if current != committed:
+              raise SystemExit(
+                  "docs/openapi.json is out of date. Regenerate it with:\n"
+                  "  python -c 'import json; from api.main import create_app; "
+                  "json.dump(create_app().openapi(), open(\"docs/openapi.json\",\"w\"), indent=2)'"
+              )
+          print(f"OpenAPI spec is current ({len(current['paths'])} paths)")
+          PYTHON
+
   security:
     name: Security scan
     runs-on: ubuntu-latest
@@ -308,6 +376,33 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build jobs image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: jobs
+          tags: mlchal-jobs:${{ github.sha }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify the jobs image can actually run the jobs
+        # The drift job needs scipy, which the serving layer deliberately does
+        # not carry. It previously shipped on the API image and crashed the
+        # first time both drift windows had enough data to reach the KS test --
+        # before that it exited early on an empty baseline and looked healthy.
+        run: |
+          set -euo pipefail
+          docker run --rm mlchal-jobs:${{ github.sha }} \
+            python -c "import scipy; from models.validation.drift import kolmogorov_smirnov; print('drift deps OK', scipy.__version__)"
+
+          # And the converse: scipy must stay out of the serving image.
+          if docker run --rm mlchal-api:${{ github.sha }} python -c "import scipy" 2>/dev/null; then
+            echo "::error::scipy leaked into the serving image"
+            exit 1
+          fi
+          echo "scipy absent from the API image, as intended"
+
       - name: Verify image hardening
         # Asserts the properties the Dockerfile claims. A base image change
         # that silently reverts to root would otherwise ship unnoticed.
@@ -337,6 +432,19 @@ jobs:
             exit 1
           fi
 
+          # The container must size ONNX Runtime's thread pool from its cgroup
+          # quota, not from the host's processor count. Getting this wrong is
+          # silent and cost 8x on the measured image (102.8 ms against 12.4 ms
+          # per classification), so it is asserted against a real CPU limit
+          # rather than trusted.
+          budget=$(docker run --cpus 2 mlchal-api:${{ github.sha }} \
+            python -c "from api.services.runtime import available_cpus; print(available_cpus())")
+          echo "Thread budget under --cpus 2: $budget"
+          if [ "$budget" != "2" ]; then
+            echo "::error::available_cpus() returned $budget for a 2-CPU container"
+            exit 1
+          fi
+
       - name: Validate Kubernetes and monitoring configuration
         # Written configuration that is never validated drifts. These run
         # against the real schemas and parsers, not a YAML linter: a manifest
@@ -354,6 +462,38 @@ jobs:
           docker run -v "$PWD/monitoring/alertmanager:/etc/alertmanager:ro" --rm \
             --entrypoint amtool prom/alertmanager:v0.28.0 \
             check-config /etc/alertmanager/alertmanager.yml
+
+      - name: Verify every service is bounded and probed
+        # Resource limits and health checks are easy to add for the services
+        # someone thought about and easy to forget for the rest. `ml-api` and
+        # `worker` inherit HEALTHCHECK from the Dockerfile; `migrate` is a
+        # one-shot job.
+        run: |
+          set -euo pipefail
+          JWT_SECRET_KEY=ci POSTGRES_PASSWORD=ci docker compose config > /tmp/rendered.yml
+          python - <<'PYTHON'
+          import sys, yaml
+
+          services = yaml.safe_load(open("/tmp/rendered.yml"))["services"]
+          inherits_healthcheck = {"ml-api", "worker"}
+          one_shot = {"migrate"}
+
+          unbounded = [
+              name for name, spec in services.items()
+              if not spec.get("deploy", {}).get("resources", {}).get("limits")
+          ]
+          unprobed = [
+              name for name, spec in services.items()
+              if not spec.get("healthcheck")
+              and name not in inherits_healthcheck | one_shot
+          ]
+
+          if unbounded:
+              print(f"::error::Services without resource limits: {unbounded}")
+          if unprobed:
+              print(f"::error::Services without a health check: {unprobed}")
+          sys.exit(1 if unbounded or unprobed else 0)
+          PYTHON
 
       - name: Validate Compose configuration
         run: |

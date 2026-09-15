@@ -41,6 +41,12 @@ x-logging: &default-logging
 
 services:
   # --- Gateway ------------------------------------------------------------
+  # Every long-running service carries a CPU and memory limit. The two that
+  # matter for correctness are `ml-api` and `worker`: ONNX Runtime sizes its
+  # thread pool from the CPU budget it can see, so an unlimited container on a
+  # many-core host behaves very differently from a production one. The rest are
+  # bounded so a single service cannot exhaust a development machine, and are
+  # deliberately looser than the production overlay.
   api-gateway:
     image: nginx:1.27-alpine
     container_name: mlchal-gateway
@@ -63,6 +69,11 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 128M
     restart: unless-stopped
     networks: [frontend, backend]
     logging: *default-logging
@@ -85,6 +96,13 @@ services:
       postgres:
         condition: service_healthy
     restart: "no"
+    # Short-lived jobs on the API image. Bounded so a runaway migration or
+    # a drift window larger than expected cannot starve the serving path.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
     networks: [backend]
     logging: *default-logging
 
@@ -176,6 +194,11 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
     restart: unless-stopped
     networks: [backend]
     logging: *default-logging
@@ -202,6 +225,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
     restart: unless-stopped
     networks: [backend]
     logging: *default-logging
@@ -219,14 +247,18 @@ services:
   # The partition job must stay ahead of inserts: rows arriving with no matching
   # partition land in the DEFAULT partition, which retention will never drop.
   maintenance:
-    image: mlchal-api:latest
+    # The jobs image, not the API image: `analyse_drift` runs a
+    # Kolmogorov-Smirnov test and needs scipy, which is deliberately absent
+    # from the serving layer. Sharing the API image meant this crashed the
+    # first time both drift windows had data.
+    image: mlchal-jobs:latest
     build:
       context: .
       dockerfile: Dockerfile
-      target: api
+      target: jobs
     container_name: mlchal-maintenance
     environment: *api-env
-    # These reuse the API image and therefore inherit its HEALTHCHECK, which
+    # These reuse a serving image layer and would inherit its HEALTHCHECK, which
     # probes an HTTP port they do not serve -- leaving them permanently
     # unhealthy and, worse, making a genuinely broken job indistinguishable
     # from a working one. A sleeping scheduler has no meaningful readiness
@@ -246,6 +278,13 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    # Short-lived jobs on the API image. Bounded so a runaway migration or
+    # a drift window larger than expected cannot starve the serving path.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
     networks: [backend, monitoring]
     logging: *default-logging
 
@@ -255,14 +294,18 @@ services:
   # that only writes to stdout is not alerting -- nobody reads a container log
   # on a schedule.
   drift:
-    image: mlchal-api:latest
+    # The jobs image, not the API image: `analyse_drift` runs a
+    # Kolmogorov-Smirnov test and needs scipy, which is deliberately absent
+    # from the serving layer. Sharing the API image meant this crashed the
+    # first time both drift windows had data.
+    image: mlchal-jobs:latest
     build:
       context: .
       dockerfile: Dockerfile
-      target: api
+      target: jobs
     container_name: mlchal-drift
     environment: *api-env
-    # These reuse the API image and therefore inherit its HEALTHCHECK, which
+    # These reuse a serving image layer and would inherit its HEALTHCHECK, which
     # probes an HTTP port they do not serve -- leaving them permanently
     # unhealthy and, worse, making a genuinely broken job indistinguishable
     # from a working one. A sleeping scheduler has no meaningful readiness
@@ -285,6 +328,13 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    # Short-lived jobs on the API image. Bounded so a runaway migration or
+    # a drift window larger than expected cannot starve the serving path.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
     networks: [backend, monitoring]
     logging: *default-logging
 
@@ -294,6 +344,16 @@ services:
   pushgateway:
     image: prom/pushgateway:v1.11.0
     container_name: mlchal-pushgateway
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:9091/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
     restart: unless-stopped
     networks: [backend, monitoring]
     logging: *default-logging
@@ -319,6 +379,11 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
     restart: unless-stopped
     networks: [backend, monitoring]
     logging: *default-logging
@@ -337,6 +402,11 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
     restart: unless-stopped
     networks: [monitoring]
     logging: *default-logging
@@ -357,6 +427,17 @@ services:
     depends_on:
       prometheus:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
     restart: unless-stopped
     networks: [monitoring]
     logging: *default-logging

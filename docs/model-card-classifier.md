@@ -120,10 +120,15 @@ attributable to floating-point ordering between the two preprocessing
 implementations, which agree to 7.2e-07 per pixel.
 
 That agreement is asserted by
-`tests/unit/test_image_processing.py::TestTorchvisionEquivalence` across eight
+`tests/unit/test_image_processing.py::TestTorchvisionEquivalence` across seven
 input shapes, and is the only thing preventing the two implementations from
 drifting apart — see the write-up's discussion of the two silent preprocessing
 bugs found that way.
+
+The ONNX graph itself agrees with the PyTorch model to **3.073e-06**,
+re-measured against the committed artefact by `scripts/verify_exports.py` and
+recorded in
+[`benchmarks/export_fidelity.json`](../benchmarks/export_fidelity.json).
 
 ### Latency
 
@@ -131,12 +136,21 @@ Batch 32, RTX 5000 Ada. Full matrix in [`benchmarks/README.md`](../benchmarks/RE
 
 | Backend | Latency | Throughput | Top-1 |
 | --- | ---: | ---: | ---: |
-| PyTorch eager FP32 | 16.78 ms | 1,907 img/s | 87.25%* |
-| PyTorch eager bf16 | 5.23 ms | 6,118 img/s | 87.25%* |
-| TensorRT FP16 | 3.49 ms | 9,177 img/s | 87.25%* |
-| ONNX Runtime CPU INT8 | 475 ms | 67 img/s | 81.85%* |
+| PyTorch eager FP32 | 16.73 ms | 1,913 img/s | not measured |
+| PyTorch eager bf16 | 5.19 ms | 6,162 img/s | not measured |
+| TensorRT FP16 | 3.51 ms | 9,105 img/s | not measured |
+| ONNX Runtime CUDA FP32 | 18.94 ms | 1,689 img/s | 87.25%* |
+| ONNX Runtime CPU FP32 | 519.26 ms | 62 img/s | 87.25%* |
+| ONNX Runtime CPU INT8 | 460.80 ms | 69 img/s | 81.85%* |
 
-\* measured on a fixed 2,000-image subset, so slightly above the full-split figure.
+\* measured on a fixed 2,000-image subset, so slightly above the full-split
+figure of 85.78%.
+
+**Accuracy was only measured on the ONNX rows**, because that is where a
+precision change can alter the result. The PyTorch and TensorRT rows are marked
+"not measured" rather than inheriting the FP32 figure: bf16 and FP16 are
+expected to be near-lossless here, but expected is not measured, and this card
+should not assert otherwise.
 
 Single-image latency is 1.05 ms under TensorRT.
 
@@ -203,8 +217,9 @@ image-rights regimes should confirm their legal position independently.
 
 **Audit trail.** Every inference is recorded with caller, model version,
 timestamp, and prediction, so a disputed output can be traced to a specific
-artefact. No image bytes are retained — only a SHA-256 digest. Operators must
-set a retention policy; nothing here expires records automatically.
+artefact. No image bytes are retained — only a SHA-256 digest. The table is
+range-partitioned by month and expired partitions are dropped daily by the
+`maintenance` service; retention defaults to six months and is configurable.
 
 **Dual use.** The pipeline generalises to any classification task, including
 harmful ones. The training code is task-agnostic; responsibility sits with the
