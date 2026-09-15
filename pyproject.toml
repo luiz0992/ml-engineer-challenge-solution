@@ -188,6 +188,23 @@ plugins = ["pydantic.mypy"]
 # Tests are type-checked (see scripts/lint), but pytest fixtures and
 # parametrised helpers are frequently left unannotated by convention, and
 # requiring annotations on them adds noise without catching anything.
+# These modules import torch, timm, transformers and omegaconf, which live in
+# the optional `train` extra. With the extra installed their `type: ignore`
+# comments are required; without it `ignore_missing_imports` turns those
+# symbols into Any and the same comments become "unused".
+#
+# `warn_unused_ignores` therefore produced a different answer depending on
+# which extras happened to be present -- clean locally, five errors in CI,
+# where the training stack is deliberately not installed. The alternative was
+# to install several gigabytes of CUDA wheels in the lint job to type-check a
+# resize function.
+[[tool.mypy.overrides]]
+module = [
+    "models.training.*",
+    "models.data.*",
+]
+warn_unused_ignores = false
+
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false

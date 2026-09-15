@@ -23,6 +23,24 @@ from api.config import (
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def isolated_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build every `Settings` in this module from defaults alone.
+
+    `_env_file=None` keeps a developer's .env out of the run, but not the
+    ambient environment -- pydantic-settings still reads real variables. CI
+    exports `POSTGRES_PASSWORD` and `JWT_SECRET_KEY` for its Postgres service
+    and application config, which silently satisfied the insecure-default
+    assertions: three tests here passed on a laptop and failed on the runner.
+
+    Cleared by field name, so a new setting cannot quietly reintroduce the
+    dependency.
+    """
+    for field in Settings.model_fields:
+        monkeypatch.delenv(field.upper(), raising=False)
+        monkeypatch.delenv(field.lower(), raising=False)
+
+
 class TestProductionGuard:
     def test_development_generates_a_random_key(self) -> None:
         """Local runs need no setup but still never share a hardcoded secret.

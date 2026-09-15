@@ -184,15 +184,23 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
 
-      - name: Install with the training stack
-        # A separate job because torch is ~2.5 GB and the rest of the suite
-        # does not need it. It runs here rather than nowhere because
+      - name: Install with the training transform
+        # A separate job because torch is large and the rest of the suite does
+        # not need it. It runs here rather than nowhere because
         # `pytest.importorskip("torch")` silently skips the whole module in the
         # main test job -- including TestTorchvisionEquivalence, which is the
         # only thing preventing the serving preprocessing from drifting away
         # from the training transform. Two silent accuracy bugs were found that
         # way; a skipped guard is no guard.
-        run: uv sync --extra dev --extra train --frozen
+        #
+        # CPU wheels, not the `train` extra. That extra also pulls
+        # onnxruntime-gpu and tensorrt-cu12, which exhausted the runner's disk
+        # ("No space left on device") -- several gigabytes of CUDA to compare
+        # two resize implementations that run on the CPU.
+        run: |
+          uv sync --extra dev --frozen
+          uv pip install --index-url https://download.pytorch.org/whl/cpu \
+            torch torchvision
 
       - name: Run equivalence tests
         run: |

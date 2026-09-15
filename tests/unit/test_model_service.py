@@ -273,7 +273,20 @@ class TestCpuBudget:
     slower -- which is why it is worth a test rather than a comment.
     """
 
-    def test_reads_a_cgroup_v2_quota(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.fixture
+    def many_host_cpus(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pin the affinity count so the quota is what the test measures.
+
+        `available_cpus` takes the minimum of affinity and quota. Without this
+        the result depends on the machine: these assertions passed on a 32-core
+        workstation and failed on a 2-core CI runner, where the affinity floor
+        was lower than the quota under test.
+        """
+        monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: set(range(64)))
+
+    def test_reads_a_cgroup_v2_quota(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, many_host_cpus: None
+    ) -> None:
         quota = tmp_path / "cpu.max"
         quota.write_text("400000 100000")
         monkeypatch.setattr("api.services.runtime._CGROUP_V2_QUOTA", quota)
@@ -291,7 +304,9 @@ class TestCpuBudget:
 
         assert runtime.available_cpus() == len(os.sched_getaffinity(0))
 
-    def test_reads_a_cgroup_v1_quota(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_reads_a_cgroup_v1_quota(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, many_host_cpus: None
+    ) -> None:
         (tmp_path / "cpu.cfs_quota_us").write_text("200000")
         (tmp_path / "cpu.cfs_period_us").write_text("100000")
         monkeypatch.setattr("api.services.runtime._CGROUP_V2_QUOTA", tmp_path / "absent")
@@ -301,6 +316,22 @@ class TestCpuBudget:
         )
 
         assert runtime.available_cpus() == 2
+
+    def test_the_quota_never_exceeds_cpu_affinity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A generous quota must not licence more threads than we can run.
+
+        A pinned process is bounded by affinity even with no quota set, so the
+        budget is the minimum of the two.
+        """
+        quota = tmp_path / "cpu.max"
+        quota.write_text("6400000 100000")
+        monkeypatch.setattr("api.services.runtime._CGROUP_V2_QUOTA", quota)
+        monkeypatch.setattr("api.services.runtime._CGROUP_V1_QUOTA", tmp_path / "absent")
+        monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: {0, 1, 2})
+
+        assert runtime.available_cpus() == 3
 
     def test_a_corrupt_quota_file_does_not_raise(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
