@@ -433,6 +433,98 @@ class TestDetection:
         # The message points at what does work.
         assert "classify" in response.json()["error"]["message"]
 
+    async def test_returns_boxes_in_uploaded_pixel_space(
+        self, auxiliary_client: Any, auxiliary_auth_headers: dict[str, str]
+    ) -> None:
+        response = await auxiliary_client.post(
+            "/api/v1/detect",
+            files=upload(make_image_bytes(width=200, height=100)),
+            headers=auxiliary_auth_headers,
+        )
+        body = response.json()
+
+        assert response.status_code == 200
+        assert body["image_width"] == 200
+        assert body["image_height"] == 100
+        assert body["provenance"]["model_name"] == "rtdetr-coco-detector"
+        assert body["detections"]
+        box = body["detections"][0]["box"]
+        assert 0.0 <= box["x_min"] <= box["x_max"] <= 200.0
+        assert 0.0 <= box["y_min"] <= box["y_max"] <= 100.0
+
+    async def test_confidence_threshold_filters_detections(
+        self, auxiliary_client: Any, auxiliary_auth_headers: dict[str, str]
+    ) -> None:
+        low = (
+            await auxiliary_client.post(
+                "/api/v1/detect?confidence_threshold=0.5",
+                files=upload(make_image_bytes()),
+                headers=auxiliary_auth_headers,
+            )
+        ).json()
+        high = (
+            await auxiliary_client.post(
+                "/api/v1/detect?confidence_threshold=0.99",
+                files=upload(make_image_bytes()),
+                headers=auxiliary_auth_headers,
+            )
+        ).json()
+
+        assert low["detections"]
+        assert high["detections"] == []
+
+    async def test_requires_a_token(self, auxiliary_client: Any) -> None:
+        response = await auxiliary_client.post("/api/v1/detect", files=upload(make_image_bytes()))
+        assert response.status_code == 401
+
+
+class TestSimilarity:
+    async def test_reports_unavailable_rather_than_missing(
+        self, client: Any, auth_headers: dict[str, str]
+    ) -> None:
+        response = await client.post(
+            "/api/v1/similar", files=upload(make_image_bytes()), headers=auth_headers
+        )
+
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "model_unavailable"
+        assert "build_similarity_index" in response.json()["error"]["message"]
+
+    async def test_returns_ranked_neighbours_with_provenance(
+        self, auxiliary_client: Any, auxiliary_auth_headers: dict[str, str]
+    ) -> None:
+        response = await auxiliary_client.post(
+            "/api/v1/similar?top_k=5",
+            files=upload(make_image_bytes()),
+            headers=auxiliary_auth_headers,
+        )
+        body = response.json()
+
+        assert response.status_code == 200
+        assert 1 <= len(body["results"]) <= 5
+        similarities = [r["similarity"] for r in body["results"]]
+        assert similarities == sorted(similarities, reverse=True)
+        assert body["index_size"] == 50
+        assert body["provenance"]["model_name"] == "tiny-imagenet-embedder"
+        assert body["results"][0]["label"].startswith("class_")
+        assert body["results"][0]["reference"]
+
+    async def test_minimum_similarity_is_honoured(
+        self, auxiliary_client: Any, auxiliary_auth_headers: dict[str, str]
+    ) -> None:
+        body = (
+            await auxiliary_client.post(
+                "/api/v1/similar?min_similarity=0.999",
+                files=upload(make_image_bytes()),
+                headers=auxiliary_auth_headers,
+            )
+        ).json()
+        assert all(r["similarity"] >= 0.999 for r in body["results"])
+
+    async def test_requires_a_token(self, auxiliary_client: Any) -> None:
+        response = await auxiliary_client.post("/api/v1/similar", files=upload(make_image_bytes()))
+        assert response.status_code == 401
+
 
 class TestOpenAPI:
     async def test_schema_documents_every_endpoint(self, client: Any) -> None:
@@ -441,6 +533,7 @@ class TestOpenAPI:
         for required in (
             "/api/v1/classify",
             "/api/v1/detect",
+            "/api/v1/similar",
             "/api/v1/batch",
             "/api/v1/models",
             "/api/v1/health",

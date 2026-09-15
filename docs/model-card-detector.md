@@ -12,7 +12,7 @@
 | **Input** | RGB image, resized to 640×640 |
 | **Output** | 300 queries × (80 class scores, 4 box coordinates) |
 | **Licence** | **Apache-2.0** (implementation and weights) |
-| **Provenance** | Used pretrained; not fine-tuned here |
+| **Provenance** | Pretrained on Objects365+COCO, then fine-tuned on the local COCO val2017 subset (`config/train_detector.yaml`) |
 
 ## Intended use
 

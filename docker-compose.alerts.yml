@@ -1,0 +1,46 @@
+# Overlay that turns alert routing into actual delivery.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.alerts.yml up -d
+#
+# The base stack's Alertmanager config has no endpoints (a missing webhook
+# URL crashes the process). This overlay adds a local sink and points
+# Alertmanager at a config that posts to it.
+
+services:
+  alert-webhook:
+    image: mlchal-webhook:latest
+    build:
+      context: ./docker/webhook
+      dockerfile: Dockerfile
+    container_name: mlchal-webhook
+    environment:
+      WEBHOOK_LOG: /var/tmp/alerts.jsonl
+    volumes:
+      - alert-webhook-data:/var/tmp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8089/health')"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+    restart: unless-stopped
+    networks: [monitoring]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  alertmanager:
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.local.yml:/etc/alertmanager/alertmanager.yml:ro
+    depends_on:
+      alert-webhook:
+        condition: service_healthy
+
+volumes:
+  alert-webhook-data:

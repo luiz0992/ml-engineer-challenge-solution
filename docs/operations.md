@@ -50,6 +50,17 @@ Adds device reservations and `onnxruntime-gpu`. Separate overlay because a
 Compose file demanding a GPU fails outright on a machine without one. Takes
 single-image classification from 15.9 ms to about 1 ms.
 
+### Alert delivery
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.alerts.yml up -d
+```
+
+Points every Alertmanager receiver at the in-stack webhook sink
+(`docker/webhook`), which writes alerts to JSONL. The base config has no
+endpoints because an unset Slack URL crashes Alertmanager. Production
+webhooks still belong in a secret manager.
+
 ### Kubernetes
 
 ```bash
@@ -57,9 +68,9 @@ kubectl apply -f deploy/kubernetes/
 ```
 
 Ten resources, validated against real 1.30 API schemas with `kubeconform
---strict` in CI. **They have not been applied to a live cluster** — that is a
-smaller claim than "deployed and working", and worth knowing before you rely
-on them.
+--strict` and applied to a kind cluster in CI. Pods will not become ready
+there without images and a PVC backend; the apply itself is what the job
+asserts.
 
 ---
 
@@ -124,10 +135,16 @@ models/artifacts/onnx/
     └── labels.json               # and v2's own class list
 ```
 
-1. Build the artefacts for the new version and place them under
+1. Train and publish a second version. The artefacts land under
    `onnx/<version>/`, **including that version's `labels.json`**. A non-default
    version must be self-describing: without its own label map it is refused at
    load time rather than named from another version's class list.
+
+   ```bash
+   uv run python -m models.training.train --config-name train_classifier_v2
+   uv run python scripts/prepare_artifacts.py \
+       --run-dir models/artifacts/runs/classifier-v2 --version v2
+   ```
 2. Restart `ml-api`. Every version on disk is loaded at startup and logged as
    `model_loaded`; the extras are registered but **not** made active.
 3. Verify it serves, without moving any traffic:

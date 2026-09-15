@@ -177,21 +177,21 @@
   "similarity": {
     "num_queries": 1000,
     "index_size": 20000,
-    "precision_at_1": 0.815,
-    "precision_at_5": 0.7968,
-    "precision_at_10": 0.7866,
+    "precision_at_1": 0.783,
+    "precision_at_5": 0.7704,
+    "precision_at_10": 0.7589,
     "per_class": {
       "classes_evaluated": 198,
-      "mean": 0.8041,
-      "std": 0.1923,
+      "mean": 0.7764,
+      "std": 0.2029,
       "worst_10": [
         {
-          "class": "pole",
-          "precision_at_5": 0.1
+          "class": "bannister",
+          "precision_at_5": 0.0
         },
         {
-          "class": "bannister",
-          "precision_at_5": 0.1333
+          "class": "pole",
+          "precision_at_5": 0.0
         },
         {
           "class": "rocking chair",
@@ -199,36 +199,40 @@
         },
         {
           "class": "water jug",
-          "precision_at_5": 0.2857
-        },
-        {
-          "class": "pretzel",
-          "precision_at_5": 0.3333
-        },
-        {
-          "class": "cardigan",
-          "precision_at_5": 0.4
-        },
-        {
-          "class": "bucket",
-          "precision_at_5": 0.4286
+          "precision_at_5": 0.2571
         },
         {
           "class": "stopwatch",
-          "precision_at_5": 0.44
+          "precision_at_5": 0.32
         },
         {
-          "class": "grasshopper",
-          "precision_at_5": 0.45
+          "class": "syringe",
+          "precision_at_5": 0.36
+        },
+        {
+          "class": "lakeside",
+          "precision_at_5": 0.3667
+        },
+        {
+          "class": "tabby",
+          "precision_at_5": 0.4
+        },
+        {
+          "class": "neck brace",
+          "precision_at_5": 0.4
         },
         {
           "class": "umbrella",
-          "precision_at_5": 0.45
+          "precision_at_5": 0.4
         }
       ],
       "best_10": [
         {
-          "class": "pomegranate",
+          "class": "espresso",
+          "precision_at_5": 1.0
+        },
+        {
+          "class": "lemon",
           "precision_at_5": 1.0
         },
         {
@@ -240,10 +244,6 @@
           "precision_at_5": 1.0
         },
         {
-          "class": "viaduct",
-          "precision_at_5": 1.0
-        },
-        {
           "class": "torch",
           "precision_at_5": 1.0
         },
@@ -252,19 +252,19 @@
           "precision_at_5": 1.0
         },
         {
-          "class": "suspension bridge",
+          "class": "school bus",
           "precision_at_5": 1.0
         },
         {
-          "class": "sock",
+          "class": "lifeboat",
           "precision_at_5": 1.0
         },
         {
-          "class": "snorkel",
+          "class": "jinrikisha",
           "precision_at_5": 1.0
         },
         {
-          "class": "scoreboard",
+          "class": "hourglass",
           "precision_at_5": 1.0
         }
       ]

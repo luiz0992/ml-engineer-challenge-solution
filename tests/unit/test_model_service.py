@@ -159,6 +159,28 @@ class TestGracefulDegradation:
         with pytest.raises(ModelUnavailableError):
             ModelService(settings).load_classifier()
 
+    def test_int8_is_served_when_requested_and_present(
+        self, settings: Settings, artifacts_dir: Path, synthetic_onnx: Path
+    ) -> None:
+        """INT8 is a live backend, not a dead artefact.
+
+        The default path still serves FP32 because the calibration study
+        measured a 5.4pp drop. Requesting INT8 explicitly must load that
+        graph rather than ignoring the setting.
+        """
+        import shutil
+
+        shutil.copy2(synthetic_onnx, artifacts_dir / "onnx" / "classifier_int8.onnx")
+        int8_settings = settings.model_copy(
+            update={"inference_backend": InferenceBackend.ONNX_INT8}
+        )
+
+        model = ModelService(int8_settings).load_classifier()
+
+        assert model.backend is InferenceBackend.ONNX_INT8
+        assert model.artifact_path.name == "classifier_int8.onnx"
+        assert model.degraded_from is None
+
 
 class TestVersioning:
     @pytest.fixture

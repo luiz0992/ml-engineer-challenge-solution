@@ -352,6 +352,72 @@ def synthetic_embedder(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return path
 
 
+@pytest.fixture(scope="session")
+def synthetic_detector(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A tiny ONNX detector with the same interface as RT-DETR.
+
+    Emits ``(scores, boxes)`` with a dynamic batch axis. Weights are zero so
+    the bias dominates: query 0 is a confident ``class_0`` box in the centre,
+    which is enough to exercise decoding without an 84 MB artefact.
+    """
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    n_queries, n_classes = 4, 4
+    score_bias = np.zeros(n_queries * n_classes, dtype=np.float32)
+    score_bias[0] = 0.9
+    score_bias[1] = 0.1
+    box_bias = np.array(
+        [0.5, 0.5, 0.4, 0.4, 0.25, 0.25, 0.2, 0.2, 0.5, 0.5, 0.1, 0.1, 0.5, 0.5, 0.1, 0.1],
+        dtype=np.float32,
+    )
+
+    nodes = [
+        helper.make_node("GlobalAveragePool", ["pixel_values"], ["pooled"]),
+        helper.make_node("Flatten", ["pooled"], ["flat"], axis=1),
+        helper.make_node("MatMul", ["flat", "score_weight"], ["score_proj"]),
+        helper.make_node("Add", ["score_proj", "score_bias"], ["score_flat"]),
+        helper.make_node("Reshape", ["score_flat", "score_shape"], ["scores"]),
+        helper.make_node("MatMul", ["flat", "box_weight"], ["box_proj"]),
+        helper.make_node("Add", ["box_proj", "box_bias"], ["box_flat"]),
+        helper.make_node("Reshape", ["box_flat", "box_shape"], ["boxes"]),
+    ]
+
+    graph = helper.make_graph(
+        nodes,
+        "synthetic_detector",
+        inputs=[
+            helper.make_tensor_value_info("pixel_values", TensorProto.FLOAT, ["batch", 3, 640, 640])
+        ],
+        outputs=[
+            helper.make_tensor_value_info(
+                "scores", TensorProto.FLOAT, ["batch", n_queries, n_classes]
+            ),
+            helper.make_tensor_value_info("boxes", TensorProto.FLOAT, ["batch", n_queries, 4]),
+        ],
+        initializer=[
+            numpy_helper.from_array(
+                np.zeros((3, n_queries * n_classes), dtype=np.float32), name="score_weight"
+            ),
+            numpy_helper.from_array(score_bias, name="score_bias"),
+            numpy_helper.from_array(
+                np.zeros((3, n_queries * 4), dtype=np.float32), name="box_weight"
+            ),
+            numpy_helper.from_array(box_bias, name="box_bias"),
+            numpy_helper.from_array(
+                np.array([-1, n_queries, n_classes], dtype=np.int64), name="score_shape"
+            ),
+            numpy_helper.from_array(np.array([-1, n_queries, 4], dtype=np.int64), name="box_shape"),
+        ],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)], ir_version=10)
+    onnx.checker.check_model(model)
+
+    path = tmp_path_factory.mktemp("detector") / "detector_fp32.onnx"
+    onnx.save(model, str(path))
+    return path
+
+
 @pytest.fixture
 def similarity_artifacts(artifacts_dir: Path, synthetic_embedder: Path) -> Path:
     """An artifacts directory with an embedder and a small FAISS index."""
@@ -402,3 +468,63 @@ def similarity_service(similarity_artifacts: Path, settings: Settings):
     embedder = service.load_embedder()
     index = SimilarityIndex.load(similarity_artifacts)
     return SimilarityService(service, index, settings, embedder.class_names)
+
+
+@pytest.fixture
+def auxiliary_artifacts(similarity_artifacts: Path, synthetic_detector: Path) -> Path:
+    """Classifier + detector + embedder + FAISS index, for router coverage."""
+    import shutil
+
+    shutil.copy2(synthetic_detector, similarity_artifacts / "onnx" / "detector_fp32.onnx")
+    (similarity_artifacts / "detection_labels.json").write_text(
+        json.dumps(
+            {
+                "id2label": {str(i): f"class_{i}" for i in range(4)},
+                "num_classes": 4,
+                "image_size": 640,
+            }
+        )
+    )
+    return similarity_artifacts
+
+
+@pytest.fixture
+async def auxiliary_app(
+    settings: Settings,
+    auxiliary_artifacts: Path,
+    fake_redis: Any,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from api.config import get_settings
+    from api.main import create_app
+
+    get_settings.cache_clear()
+    monkeypatch.setattr("api.config.get_settings", lambda: settings)
+    monkeypatch.setattr("api.main.get_settings", lambda: settings)
+
+    async def _fake_redis_factory(_: Settings) -> Any:
+        return fake_redis
+
+    monkeypatch.setattr("api.main._create_redis", _fake_redis_factory)
+
+    application = create_app(settings)
+    application.dependency_overrides[get_settings] = lambda: settings
+    return application
+
+
+@pytest.fixture
+async def auxiliary_client(auxiliary_app) -> AsyncIterator[Any]:
+    from httpx import ASGITransport, AsyncClient
+
+    from api.main import lifespan
+
+    async with lifespan(auxiliary_app):
+        transport = ASGITransport(app=auxiliary_app)
+        async with AsyncClient(transport=transport, base_url="http://test") as http_client:
+            yield http_client
+
+
+@pytest.fixture
+async def auxiliary_auth_headers(auxiliary_client: Any) -> dict[str, str]:
+    response = await auxiliary_client.post("/api/v1/auth/token", json={"api_key": "dev-key-pro"})
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}

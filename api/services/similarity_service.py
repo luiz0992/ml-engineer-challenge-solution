@@ -1,19 +1,12 @@
 """Image similarity search.
 
-Embeds a query image with the fine-tuned backbone and retrieves its nearest
-neighbours from a FAISS index by cosine similarity.
+Embeds a query image with the dedicated contrastive backbone and retrieves
+its nearest neighbours from a FAISS index by cosine similarity.
 
 **Cosine, not Euclidean.** Embeddings are unit-norm (normalisation is baked into
 the exported graph), and inner product on unit vectors *is* cosine similarity.
 Raw L2 distance on un-normalised transformer features is dominated by vector
 magnitude, which tracks image contrast rather than content.
-
-**What this retrieves.** Features optimised for classification deliberately
-collapse intra-class variation — that is what makes a classifier work. Results
-are therefore *semantically* similar (same category, comparable pose and colour)
-rather than visually near-duplicate. For "show me more like this" that is
-usually the intent; for near-duplicate detection it is not, and a perceptual
-hash would be the right tool.
 """
 
 from __future__ import annotations

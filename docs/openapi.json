@@ -105,6 +105,24 @@
             "description": "Pin a model version. Defaults to the active one."
           },
           {
+            "name": "backend",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/InferenceBackend"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Pin an inference runtime (onnx, onnx-int8, tensorrt). Ignored unless ALLOW_BACKEND_OVERRIDE is enabled. INT8 is measured and available; it is not the default because it costs 5.4pp of top-1.",
+              "title": "Backend"
+            },
+            "description": "Pin an inference runtime (onnx, onnx-int8, tensorrt). Ignored unless ALLOW_BACKEND_OVERRIDE is enabled. INT8 is measured and available; it is not the default because it costs 5.4pp of top-1."
+          },
+          {
             "name": "include_probabilities",
             "in": "query",
             "required": false,
@@ -340,7 +358,7 @@
           "similarity"
         ],
         "summary": "Find visually similar images",
-        "description": "Retrieve the most similar indexed images, ranked by cosine similarity.\n\nResults are *semantically* similar rather than visually near-duplicate: the\nembeddings come from a classification backbone, which collapses intra-class\nvariation by design. Two different photographs of the same subject will rank\nas highly similar.",
+        "description": "Retrieve the most similar indexed images, ranked by cosine similarity.\n\nResults are nearest neighbours in the contrastive embedding space, ranked\nby cosine similarity.",
         "operationId": "find_similar_api_v1_similar_post",
         "security": [
           {
@@ -1557,6 +1575,17 @@
         ],
         "title": "HealthResponse",
         "description": "Aggregate service health.\n\n``status`` is ``healthy``, ``degraded``, or ``unhealthy``. The middle state\nmatters operationally: if the cache is down but models still serve, the\nservice is usable and should not be removed from the load balancer, but the\ncondition must still be visible."
+      },
+      "InferenceBackend": {
+        "type": "string",
+        "enum": [
+          "torch",
+          "onnx",
+          "onnx-int8",
+          "tensorrt"
+        ],
+        "title": "InferenceBackend",
+        "description": "Runtime used to execute a model.\n\nOrdered from most portable to most specialised. ``TENSORRT`` is the\nfastest but requires an NVIDIA GPU and an engine built for that exact\nGPU architecture, so it is never the default."
       },
       "JobStatus": {
         "type": "string",

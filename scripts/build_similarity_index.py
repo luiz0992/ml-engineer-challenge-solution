@@ -124,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         labels,
         [str(path.relative_to(root)) for path in files],
         args.artifacts_dir,
-        source_model="tiny-imagenet-classifier:v1",
+        source_model="tiny-imagenet-embedder:v1",
         image_size=224,
     )
 

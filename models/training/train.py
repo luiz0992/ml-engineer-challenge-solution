@@ -59,11 +59,16 @@ def build_pipeline(config: TrainConfig, accelerator: Accelerator, results_path: 
         return ClassificationPipeline(
             config=config, accelerator=accelerator, results_path=results_path
         )
+    if config.task is TaskName.embedding:
+        from models.training.embedding_pipeline import EmbeddingPipeline
 
-    raise NotImplementedError(
-        f"Task {config.task!r} has no training pipeline. Detection and embedding models "
-        "are used pretrained; see models/optimisation/ for their export path."
-    )
+        return EmbeddingPipeline(config=config, accelerator=accelerator, results_path=results_path)
+    if config.task is TaskName.detection:
+        from models.training.detection_pipeline import DetectionPipeline
+
+        return DetectionPipeline(config=config, accelerator=accelerator, results_path=results_path)
+
+    raise NotImplementedError(f"Task {config.task!r} has no training pipeline.")
 
 
 @hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="train_classifier")

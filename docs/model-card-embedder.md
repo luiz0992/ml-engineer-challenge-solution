@@ -7,7 +7,7 @@
 | **Name** | `tiny-imagenet-embedder` |
 | **Version** | v1 |
 | **Task** | Image similarity search |
-| **Architecture** | ViT-Small/16 backbone, classifier head removed |
+| **Architecture** | ViT-Small/16, supervised-contrastive fine-tune (`train_embedder`) |
 | **Embedding** | 384-d, L2-normalised |
 | **Index** | FAISS `IndexFlatIP` over 20,000 training images |
 | **Metric** | Cosine similarity |
@@ -15,20 +15,14 @@
 
 ## Design
 
-The embedder **is** the fine-tuned classifier with its head removed. That is a
-deliberate reuse with a real trade-off.
+The embedder is a **dedicated** ViT-Small trained with supervised contrastive
+loss (`config/train_embedder.yaml`). Classification features collapse
+intra-class variation by construction; a contrastive objective pulls same-class
+images together without requiring that collapse.
 
-**Why reuse.** The backbone was fine-tuned on this exact domain, so its
-penultimate features are already discriminative for these categories — which is
-what similarity search needs. It costs one extra 88 MB export and no additional
-training. A separate CLIP model would give better open-domain similarity but
-would add a third set of weights, a second preprocessing pipeline, and a model
-that has never seen this data.
-
-**The trade-off, stated plainly.** Features optimised for classification
-*collapse intra-class variation by construction* — that is precisely what makes
-a classifier work. Two different goldfish photographs are near-identical in this
-space.
+An older classification checkpoint can still be exported as an embedder (the
+head is dropped at load time) so the original artefact layout keeps working.
+New indexes should come from the contrastive run.
 
 Consequently this retrieves **semantically** similar images (same category,
 comparable pose and colour), not visually near-duplicate ones. For "show me more
@@ -55,37 +49,38 @@ index from training, so a query can never retrieve itself.
 
 | Metric | Value |
 | --- | --- |
-| Precision@1 | **81.5%** |
-| **Precision@5** | **79.7%** |
-| Precision@10 | 78.7% |
+| Precision@1 | **78.3%** |
+| **Precision@5** | **77.0%** |
+| Precision@10 | 75.9% |
 | Query latency | ~5 ms (ONNX Runtime, including embedding) |
 | Index size | 30 MB, 20,000 vectors |
 | Export fidelity | max abs. difference **2.682e-07** vs PyTorch ([measured](../benchmarks/export_fidelity.json)) |
 
 > **A correction.** An earlier version of this card reported 92% precision@5.
 > That figure came from five hand-picked classes and did not survive proper
-> measurement: across 1,000 random queries the real number is **79.7%**. The
-> original sample happened to contain visually distinctive categories. It is
-> recorded here because a cherry-picked benchmark that flatters the model is
-> exactly the kind of number that should not be trusted, including when it is
-> your own.
+> measurement: the classification-backbone index scored 79.7%, and the
+> contrastive index that is actually served scores **77.0%** across 1,000
+> random queries. The original sample happened to contain visually distinctive
+> categories. It is recorded here because a cherry-picked benchmark that
+> flatters the model is exactly the kind of number that should not be trusted,
+> including when it is your own.
 
 ### Per-class variation is large
 
-Mean per-class P@5 is 80.4% with a standard deviation of **19.2 percentage
+Mean per-class P@5 is 77.6% with a standard deviation of **20.3 percentage
 points** — far wider than the classifier's 8.6pp. Retrieval is much less
 uniform than classification.
 
 | Weakest classes | P@5 |
 | --- | ---: |
-| pole | 10.0% |
-| bannister | 13.3% |
+| bannister | 0.0% |
+| pole | 0.0% |
 | rocking chair | 20.0% |
-| water jug | 28.6% |
-| pretzel | 33.3% |
+| water jug | 25.7% |
+| stopwatch | 32.0% |
 
 The pattern is consistent: categories defined by *context* rather than
-appearance (a pole, a bannister) retrieve poorly, because the embedding
+appearance (a pole, a bannister) retrieve at zero, because the embedding
 captures overall scene composition and those objects rarely dominate their
 frame. Categories with distinctive colour and texture retrieve near-perfectly.
 
@@ -147,9 +142,9 @@ never optimised to separate them.
 texture and small detail are absent from the embeddings, so similarity is driven
 by coarse shape and colour.
 
-**Per-class retrieval varies by 19.2 percentage points**, more than twice the
-classifier's spread. The 79.7% aggregate is a poor predictor for any specific
-category: context-defined ones (`pole`, `bannister`) retrieve at 10–13%. A
+**Per-class retrieval varies by 20.3 percentage points**, more than twice the
+classifier's spread. The 77.0% aggregate is a poor predictor for any specific
+category: context-defined ones (`pole`, `bannister`) retrieve at 0%. A
 caller should not assume uniform quality.
 
 **Memory-resident.** The full index loads into memory at startup. At 30 MB that

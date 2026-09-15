@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from api.config import Settings
+from api.config import InferenceBackend, Settings
 from api.exceptions import BatchTooLargeError
 from api.logging_config import get_logger
 from api.models.responses import (
@@ -69,6 +69,7 @@ class InferenceService:
         correlation_id: str,
         top_k_results: int = 5,
         model_version: str | None = None,
+        backend: InferenceBackend | None = None,
         include_probabilities: bool = True,
         use_cache: bool = True,
         user_id: str | None = None,
@@ -89,7 +90,7 @@ class InferenceService:
             max_pixels=self.settings.max_image_pixels,
         )
 
-        model = self.models.get_classifier(model_version)
+        model = self.models.get_for_backend("tiny-imagenet-classifier", model_version, backend)
         options = {
             "top_k": top_k_results,
             "include_probabilities": include_probabilities,

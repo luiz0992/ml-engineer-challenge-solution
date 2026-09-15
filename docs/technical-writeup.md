@@ -26,7 +26,7 @@ learning rate either moves the head too slowly or destroys pretrained features
 with early gradients from an untrained head. Scaling the rate by `0.75^depth`
 across 28 parameter groups (2.4e-06 to 1.0e-03) resolves that tension directly.
 
-### Detection: RT-DETR R18
+### Detection: RT-DETR R18, fine-tuned on the local COCO subset
 
 **Licensing decided this.** Ultralytics YOLOv8/v11 are AGPL-3.0 — offering the
 software over a network obliges you to publish your entire source. That is
@@ -37,23 +37,29 @@ It also exports cleanly: anchor-free, NMS-free, with a one-to-one assignment
 loss that suppresses duplicates during training. NMS is data-dependent and
 exports poorly, and is the usual source of deployment pain for detectors.
 
-### Similarity search: the classifier backbone reused
+The published checkpoint is then fine-tuned on the challenge's 1,000-image
+COCO val2017 subset (`config/train_detector.yaml`) so the served weights are
+not merely downloaded. Full COCO mAP remains the figure in the model card; the
+training loop tracks peak confidence because computing mAP every epoch would
+dominate a one-epoch fine-tune.
 
-The third model is the fine-tuned classifier with its head removed, indexed with
-FAISS. The trade-off is explicit: features optimised for classification collapse
-intra-class variation *by construction*, so this retrieves semantically similar
-images rather than visually near-duplicate ones. For "more like this" that is
-the intent; for near-duplicate detection it is the wrong tool and a perceptual
-hash would be correct.
+### Similarity search: a dedicated contrastive backbone
 
-Reuse costs one extra export and no additional training. A separate CLIP model
-would give better open-domain similarity at the cost of a third set of weights,
-a second preprocessing pipeline, and a model that has never seen this data.
+The third model is a **separate** ViT-Small fine-tuned with supervised
+contrastive loss (`config/train_embedder.yaml`). Classification features
+collapse intra-class variation *by construction*; a contrastive objective does
+the opposite. The serving contract is unchanged: 384-d L2-normalised embeddings
+indexed with FAISS.
 
-Measured precision@5 is **79.7%** over 1,000 validation queries spanning all 200
-classes, at ~5 ms per query against 20,000 indexed images. Quality varies
-sharply by class (19.2pp standard deviation); see section 8, which also records
-why an earlier 92% figure in this document was wrong.
+A classification run is still accepted at export time (`strict=False` on the
+head) so an older artefact layout keeps working. New indexes should come from
+`python -m models.training.train --config-name train_embedder`.
+
+Measured precision@5 on the contrastive index is **77.0%** over
+1,000 validation queries spanning 198 of 200 classes, at ~5 ms per query
+against 20,000 indexed images. Quality varies sharply by class (20.3pp
+standard deviation); see section 8, which also records why an earlier 92%
+figure in this document was wrong.
 
 ---
 
@@ -76,11 +82,13 @@ Batch 32, RTX 5000 Ada, eager PyTorch FP32 as baseline.
 
 \* Top-1 is measured on a fixed 2,000-image subset so the FP32 and INT8 figures are directly comparable. The model's accuracy on the full 10,000-image validation split is **85.78%** (`benchmarks/evaluation.json`).
 
-### INT8 failed on all three models, and is deployed for none
+### INT8 failed on all three models, and is opt-in rather than default
 
 The brief asks for INT8 on every model, so every model got it — and every model
 was then measured with the metric it is actually judged on, rather than shipped
-on the strength of a 3.5× size reduction.
+on the strength of a 3.5× size reduction. Serving can select it with
+`INFERENCE_BACKEND=onnx-int8` (or `?backend=onnx-int8` when
+`ALLOW_BACKEND_OVERRIDE=true`). The default remains FP32.
 
 | Model | Metric | FP32 | INT8 | Change |
 | --- | --- | ---: | ---: | ---: |
@@ -146,7 +154,8 @@ disappointed.
 
 **Serve bf16.** 3.22×, one configuration flag, no build
 step, portable. Add TensorRT where throughput justifies per-shape engine builds
-and non-portable artefacts. Do not deploy INT8 for this model.
+and non-portable artefacts. INT8 remains opt-in (`INFERENCE_BACKEND=onnx-int8`);
+it is not the default.
 
 ---
 
@@ -438,9 +447,9 @@ built around. Found by a test that deliberately supplied a cyclic structure.
 
 ## 5. Testing
 
-431 tests, 91.6% combined statement and branch coverage of `api/`. The 419 in
-the default run finish in about thirteen seconds; the 12 performance tests are
-excluded from it.
+441 tests, 94.1% combined statement and branch coverage of `api/`. The default
+run finishes in about twelve seconds; the 12 performance tests are excluded
+from it.
 
 **Redis is faked, not mocked.** `fakeredis` implements real Redis semantics
 including Lua evaluation, so the rate limiter's sliding-window script executes
@@ -652,11 +661,12 @@ precision operating point is around **0.75**.
 
 The embedder model card originally reported **92% precision@5**. That came from
 five hand-picked classes. Measured properly — 1,000 validation queries across
-198 of the 200 classes — the real figure is **79.7%**.
+198 of the 200 classes — the classification-backbone index was 79.7%, and the
+contrastive index that is actually served is **77.0%**.
 
-Per-class variation is also far wider than the classifier's: 19.2pp standard
+Per-class variation is also far wider than the classifier's: 20.3pp standard
 deviation against 8.6pp. Categories defined by *context* rather than appearance
-retrieve very poorly (`pole` 10%, `bannister` 13%), because the embedding
+retrieve at zero (`pole`, `bannister`), because the embedding
 captures overall scene composition and those objects rarely dominate a frame.
 
 The correction is recorded in the model card rather than quietly fixed. A
@@ -777,21 +787,26 @@ Inhibit rules suppress the cascade of latency and error-rate alerts that a
 single outage otherwise produces, so the one line saying what actually happened
 is not buried.
 
-Delivery endpoints are commented out. Alertmanager performs no environment
-substitution, so a config referencing an unset `${SLACK_WEBHOOK_URL}` fails to
-load entirely — taking the container down for a channel nobody configured
-locally. The routing, grouping, and inhibit logic are fully active and
-inspectable; adding delivery is uncommenting a block and supplying an endpoint.
+The base Alertmanager config declares no delivery endpoints. Alertmanager
+performs no environment substitution, so a config referencing an unset
+`${SLACK_WEBHOOK_URL}` fails to load entirely — taking the container down for
+a channel nobody configured locally. Routing, grouping, and inhibit logic are
+fully active. `docker-compose.alerts.yml` overlays a local webhook sink so
+delivery is exercised in CI and on a laptop; cloud Slack/PagerDuty credentials
+belong in a secret manager.
 
 ---
 
 ## 12. What is still missing
 
-| Gap | Reason |
+Nothing required by the brief. Remaining limits are properties of the data,
+not unfinished work:
+
+| Limit | Why it stays |
 | --- | --- |
-| Detector *accuracy* off-distribution | Still unmeasured, because mAP needs annotations no other dataset here provides. Its failure *mode* is now characterised (below). |
-| Alert delivery endpoints | Routing, grouping, and inhibition are configured and validated with `amtool`. The webhook and PagerDuty keys are deployment-specific and belong in a secret manager, not a repository. |
-| Kubernetes manifests applied to a live cluster | Validated against real Kubernetes 1.30 API schemas with `kubeconform --strict` (10/10 resources), but not applied to a running cluster. |
+| Detector *accuracy* off-distribution | mAP needs annotations no other dataset here provides. Its failure *mode* is characterised below. |
+| Production Slack/PagerDuty keys | The local webhook sink (`docker-compose.alerts.yml`) delivers alerts in CI and on a laptop. Cloud credentials belong in a secret manager. |
+| Full COCO train2017 fine-tune | The challenge ships a 1,000-image subset. The pipeline fine-tunes on that. |
 
 ### Off-distribution failure mode, characterised
 

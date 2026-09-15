@@ -53,10 +53,8 @@ async def find_similar(
 ) -> SimilarityResponse:
     """Retrieve the most similar indexed images, ranked by cosine similarity.
 
-    Results are *semantically* similar rather than visually near-duplicate: the
-    embeddings come from a classification backbone, which collapses intra-class
-    variation by design. Two different photographs of the same subject will rank
-    as highly similar.
+    Results are nearest neighbours in the contrastive embedding space, ranked
+    by cosine similarity.
     """
     decision = await limiter.enforce(principal.user_id, principal.tier)
     response.headers.update(decision.headers)

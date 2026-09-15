@@ -1,24 +1,13 @@
 """Image similarity search: embedding export and index construction.
 
-The third model reuses the fine-tuned classifier's backbone as a feature
-extractor rather than introducing a separate network. That is a deliberate
-choice with a real trade-off.
+The third model is a dedicated ViT-Small fine-tuned with supervised
+contrastive loss (:mod:`models.training.embedding_pipeline`). Classification
+features collapse intra-class variation by construction; a contrastive
+objective does the opposite.
 
-**Why reuse the backbone.** The backbone was fine-tuned on this exact domain, so
-its penultimate features are already discriminative for these 200 categories —
-which is what similarity search needs. It costs nothing extra to serve: the same
-87 MB of weights, one additional 1.5 MB export with the classifier head removed.
-A separate CLIP model would give better *open-domain* similarity but would add
-a third set of weights, a second preprocessing pipeline, and a model that has
-never seen this data.
-
-**The trade-off, stated plainly.** Features optimised for classification
-collapse intra-class variation by construction — that is what makes a classifier
-work. Two different goldfish photographs will look nearly identical in this
-space. The index therefore retrieves *semantically* similar images (same
-category, similar pose and colour) rather than visually near-duplicate ones. For
-"find more like this" that is usually what is wanted; for near-duplicate
-detection it is not, and a perceptual hash would be the right tool.
+A run trained as ``task: embedding`` already has ``num_classes=0`` and loads
+strictly. A classification run is still accepted: the head is dropped with
+``strict=False`` so an older artefact layout keeps working.
 
 **Why cosine similarity.** Embeddings are L2-normalised and the index uses inner
 product, which for unit vectors is exactly cosine similarity. Raw L2 distance on
@@ -100,12 +89,12 @@ def build_normalised_embedder(backbone: Any) -> Any:
 
 
 def build_embedding_model(run_dir: Path) -> tuple[Any, dict[str, Any]]:
-    """Rebuild the fine-tuned backbone with its classifier head removed.
+    """Load a dedicated embedding run, or drop the head of a classifier run.
 
-    ``num_classes=0`` makes timm return pooled features instead of logits. The
-    fine-tuned weights are loaded with ``strict=False`` because the checkpoint
-    contains head parameters this model does not have; the return value is
-    checked so that a genuinely incomplete load still fails.
+    A ``task: embedding`` checkpoint already has ``num_classes=0``. A
+    classification run is still accepted: ``strict=False`` ignores head
+    tensors so an older artefact layout keeps working. Either way the return
+    value is checked so a genuinely incomplete load still fails.
     """
     import timm
     from safetensors.torch import load_file
@@ -121,11 +110,10 @@ def build_embedding_model(run_dir: Path) -> tuple[Any, dict[str, Any]]:
     model = timm.create_model(model_name, pretrained=False, num_classes=0)
     state_dict = load_file(candidates[-1] / "model.safetensors")
 
+    # A dedicated embedding run has no classifier head, so the load is strict.
+    # A classification run still works: the head tensors are unexpected and
+    # ignored, which is the original reuse path.
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-
-    # Only the classifier head may be absent. Anything else means the backbone
-    # is partially random, which would produce plausible-looking but meaningless
-    # embeddings.
     unexpected_non_head = [
         k for k in unexpected if not k.startswith(("head.", "fc.", "classifier."))
     ]

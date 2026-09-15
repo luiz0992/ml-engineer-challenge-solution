@@ -1,0 +1,28 @@
+# Fine-tune RT-DETR R18 on the local COCO val2017 subset.
+#
+#   uv run python -m models.training.train --config-name train_detector
+defaults:
+  - train_classifier
+  - _self_
+
+task: detection
+experiment_name: coco-rtdetr-finetune
+
+model:
+  name: PekingU/rtdetr_r18vd_coco_o365
+  num_classes: 80
+  drop_path_rate: 0.0
+
+training:
+  epochs: 1
+  encoder_learning_rate: 1.0e-5
+  head_learning_rate: 1.0e-5
+  learning_rate_strategy: uniform
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+
+dataloader:
+  batch_size_train: 4
+  batch_size_validation: 4
+  dataloader_num_workers: 4
+  image_size: 640

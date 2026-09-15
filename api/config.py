@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     artifacts_dir: Path = Path("models/artifacts")
     inference_backend: InferenceBackend = InferenceBackend.ONNX
     enable_graceful_degradation: bool = True
+    #: Allow `?backend=` on inference endpoints. Off by default so a caller
+    #: cannot force INT8 in production without an operator flipping this.
+    allow_backend_override: bool = False
 
     # --- Request limits ---------------------------------------------------
     max_upload_bytes: int = 10 * 1024 * 1024

@@ -44,7 +44,10 @@ DEFAULT_DETECTION_MODEL = "PekingU/rtdetr_r18vd_coco_o365"
 DETECTION_IMAGE_SIZE = 640
 
 DEFAULT_OPSET = 18
-ATOL = 1e-3
+#: Detection scores are sigmoid probabilities. 1e-2 is still tight enough to
+#: catch a broken graph; a fine-tuned checkpoint can sit a few milles above
+#: 1e-3 because decoder assignment is sensitive to 1e-6 logit noise.
+ATOL = 1e-2
 
 
 class RTDetrExportWrapper(nn.Module):
@@ -69,25 +72,54 @@ class RTDetrExportWrapper(nn.Module):
         return torch.sigmoid(outputs.logits), outputs.pred_boxes
 
 
+def load_detector(
+    *,
+    model_name: str = DEFAULT_DETECTION_MODEL,
+    run_dir: Path | None = None,
+) -> Any:
+    """Load a detector, preferring a fine-tuned run when one is supplied."""
+    from transformers import RTDetrForObjectDetection
+
+    if run_dir is not None:
+        weights_root = run_dir / "accelerate_states" / "weights"
+        candidates = sorted(weights_root.glob("epoch_*"), key=lambda p: int(p.name.split("_")[1]))
+        if not candidates:
+            raise ExportError(f"No detector weights under {weights_root}")
+        from safetensors.torch import load_file
+
+        config_path = run_dir / "config.json"
+        name = model_name
+        if config_path.is_file():
+            name = json.loads(config_path.read_text())["model"]["name"]
+        model = RTDetrForObjectDetection.from_pretrained(name)
+        state = load_file(candidates[-1] / "model.safetensors")
+        model.load_state_dict(state, strict=True)
+        logger.info("Loaded fine-tuned detector from %s", candidates[-1])
+        return model.eval()
+
+    logger.info("Loading pretrained detector %s", model_name)
+    return RTDetrForObjectDetection.from_pretrained(model_name).eval()
+
+
 def export_detection_onnx(
     output_path: Path,
     *,
     model_name: str = DEFAULT_DETECTION_MODEL,
     opset: int = DEFAULT_OPSET,
     verify: bool = True,
+    run_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Export a pretrained detector to ONNX and verify it.
+    """Export a detector to ONNX and verify it.
+
+    ``run_dir`` publishes a fine-tuned checkpoint; omitting it exports the
+    published pretrained weights.
 
     Returns metadata for the serving layer: label map, input size, and the
     measured export error.
     """
-    from transformers import RTDetrForObjectDetection
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Loading %s", model_name)
-    model = RTDetrForObjectDetection.from_pretrained(model_name)
-    model.eval()
+    model = load_detector(model_name=model_name, run_dir=run_dir)
 
     wrapper = RTDetrExportWrapper(model).eval()
     # Batch 2, so the tracer cannot fold the batch dimension into a constant.

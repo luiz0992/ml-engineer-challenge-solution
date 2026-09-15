@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1.7
+# Scheduled-jobs image. Same graph as the root Dockerfile `--target jobs`.
+#
+#   docker build --target jobs -t mlchal-jobs:latest -f Dockerfile .
+FROM python:3.12-slim-bookworm AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.9.6 /uv /usr/local/bin/uv
+WORKDIR /build
+COPY pyproject.toml uv.lock README.md ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
+FROM python:3.12-slim-bookworm
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1001 app \
+    && useradd --system --uid 1001 --gid app --create-home --shell /usr/sbin/nologin app
+COPY --from=builder --chown=app:app /build/.venv /build/.venv
+COPY --from=ghcr.io/astral-sh/uv:0.9.6 /uv /usr/local/bin/uv
+ENV VIRTUAL_ENV=/build/.venv PATH="/build/.venv/bin:$PATH" PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY --chown=app:app api/ ./api/
+COPY --chown=app:app worker/ ./worker/
+COPY --chown=app:app models/__init__.py ./models/
+COPY --chown=app:app models/validation/ ./models/validation/
+COPY --chown=app:app scripts/ ./scripts/
+COPY --chown=app:app alembic.ini ./
+COPY --chown=app:app migrations/ ./migrations/
+RUN mkdir -p /app/models/artifacts && chown -R app:app /app
+USER app
+RUN --mount=type=cache,target=/home/app/.cache/uv,uid=1001,gid=1001 \
+    uv pip install --python /build/.venv/bin/python "scipy>=1.14"
+CMD ["python", "-m", "scripts.maintain_partitions", "--push-metrics"]

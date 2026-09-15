@@ -1,0 +1,26 @@
+# Dedicated similarity backbone: supervised contrastive fine-tune of ViT-Small.
+#
+#   uv run python -m models.training.train --config-name train_embedder
+defaults:
+  - train_classifier
+  - _self_
+
+task: embedding
+experiment_name: tiny-imagenet-embedding
+
+training:
+  epochs: 2
+  # Contrastive loss is sensitive to large steps on a pretrained backbone.
+  encoder_learning_rate: 5.0e-5
+  head_learning_rate: 5.0e-5
+  learning_rate_strategy: uniform
+  warmup_ratio: 0.05
+
+dataloader:
+  # Larger batches give more in-batch positives for the contrastive loss.
+  batch_size_train: 64
+  batch_size_validation: 64
+  mixup_alpha: 0.0
+  cutmix_alpha: 0.0
+  mix_prob: 0.0
+  label_smoothing: 0.0

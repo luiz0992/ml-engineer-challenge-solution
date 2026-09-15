@@ -157,8 +157,11 @@ ignore = [
 # objects they stand in for; ClassVar annotations would add noise without
 # changing behaviour.
 "tests/**" = ["S101", "S104", "S105", "S106", "ARG001", "ARG002", "RUF012"]
+"tests/unit/test_training.py" = ["E402", "S101", "S104", "S105", "S106", "ARG001", "ARG002", "RUF012"]
 # S311: the load generator picks images and batch sizes at random to avoid a
 # uniform workload. Nothing here is a secret, so a CSPRNG would only be slower.
+"docker/webhook/server.py" = ["S104", "S108", "ARG002"]
+"tests/e2e/**" = ["S101", "S104", "S105", "S106", "ARG001", "ARG002", "RUF012"]
 "tests/performance/locustfile.py" = [
     "S101",
     "S104",
@@ -218,12 +221,13 @@ addopts = [
     "--strict-config",
     # Performance tests are excluded by default: they are slower and their
     # thresholds are host-dependent. Run them with `-m performance`.
-    "-m", "not performance",
+    "-m", "not performance and not e2e",
 ]
 markers = [
     "unit: fast, fully isolated tests with no external dependencies",
     "integration: full request path; database tests need a real Postgres (POSTGRES_HOST or testcontainers)",
     "performance: latency and memory benchmarks; excluded from the default run",
+    "e2e: live Compose stack; requires E2E_BASE_URL; excluded from the default run",
     "gpu: requires a CUDA device",
     "slow: takes more than ~5 seconds",
 ]

@@ -19,8 +19,9 @@ ARGS=()
 
 for arg in "$@"; do
     case "$arg" in
-        --performance) MARKERS=(-m performance) ;;
-        --all)         MARKERS=(-m "") ;;
+        --performance) MARKERS=(-o addopts= -m performance) ;;
+        --e2e)         MARKERS=(-o addopts= -m e2e) ;;
+        --all)         MARKERS=(-o addopts=) ;;
         --fast)        COVERAGE=() ;;
         *)             ARGS+=("$arg") ;;
     esac

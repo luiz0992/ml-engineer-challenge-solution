@@ -199,6 +199,9 @@ Reproduce with:
 ```bash
 python scripts/setup/download_datasets.py --dataset tiny_imagenet
 uv run python -m models.training.train
+uv run python -m models.training.train --config-name train_embedder
+uv run python -m models.training.train --config-name train_detector
+uv run python -m models.training.train --config-name train_classifier_v2
 ```
 
 ### Object detection — COCO (80 classes)
@@ -221,24 +224,21 @@ obliges anyone offering the service over a network to publish their source.
 
 ### Image similarity search
 
-The fine-tuned classifier backbone with its head removed, indexed with FAISS
-over 20,000 training images.
+A dedicated ViT-Small fine-tuned with supervised contrastive loss
+(`config/train_embedder.yaml`), indexed with FAISS over 20,000 training images.
 
 | Metric | Value |
 | --- | --- |
-| Precision@1 | 81.5% |
-| **Precision@5** | **79.7%** |
+| Precision@1 | 78.3% |
+| **Precision@5** | **77.0%** |
 | Query latency | ~5 ms |
 | Embedding | 384-d, L2-normalised, cosine similarity |
 
 Measured over 1,000 validation queries drawn at random from the validation
-split, which happened to cover 198 of the 200 classes. Per-class
-variation is large (19.2pp sd): context-defined categories like `pole` retrieve
-at 10%, distinctive ones near-perfectly.
-
-Retrieves **semantically** similar images rather than near-duplicates —
-classification features collapse intra-class variation by construction. For
-near-duplicate detection a perceptual hash would be the right tool.
+split, which happened to cover 198 of the 200 classes, against the
+contrastive-embedder index. Per-class variation is large (20.3pp sd):
+context-defined categories like `pole` and `bannister` retrieve at 0%,
+distinctive ones near-perfectly.
 
 ### Measured quality
 
@@ -486,13 +486,13 @@ scripts/test --fast          # skip coverage, for a tight edit loop
 scripts/lint --fix           # ruff + mypy
 ```
 
-**431 tests, 91.6% combined statement and branch coverage** of `api/`. CI gates
-at 90%.
+**441 tests, 94.1% combined statement and branch coverage** of `api/`. CI gates
+at 90%. Six Compose E2E tests run only when `E2E_BASE_URL` is set.
 
 | Suite | Count | Scope |
 | --- | ---: | --- |
-| Unit | 344 | Validation, preprocessing, auth, rate limiting, cache, model loading |
-| Integration | 75 | Full request path with a fake Redis and a synthetic model, plus database operations against a real Postgres |
+| Unit | 359 | Validation, preprocessing, auth, rate limiting, cache, model loading |
+| Integration | 82 | Full request path with a fake Redis and a synthetic model, plus database operations against a real Postgres |
 | Performance | 12 | Latency, memory profiling, concurrency, batching |
 
 Most of the suite runs against fakes — `fakeredis` with real Lua semantics, a
@@ -645,12 +645,9 @@ The ones worth knowing before you read the results:
 
 | Limitation | Detail |
 | --- | --- |
-| INT8 is built for all three models and deployed for none | Quantization is applied and measured per model. It costs the classifier 5.4pp of top-1, the detector 87% of its mAP (small-object AP falls to exactly zero), and the embedder half its top-5 retrieval. Serving runs FP32 ONNX with TensorRT FP16 engines. See [`benchmarks/ANALYSIS.md`](benchmarks/ANALYSIS.md) §2. |
-| The embedder is not a third network | It is the fine-tuned classifier backbone with the head removed. Cheap to serve and honest about it, but a purpose-trained metric-learning model would retrieve better. |
+| INT8 is live but not the default | Built for all three models. Serve it with `INFERENCE_BACKEND=onnx-int8` or `?backend=onnx-int8` when `ALLOW_BACKEND_OVERRIDE=true`. Default remains FP32 because INT8 costs 5.4pp / 87% mAP / 50% recall. See [`benchmarks/ANALYSIS.md`](benchmarks/ANALYSIS.md) §2. |
 | Detector accuracy off-distribution | Unmeasured — mAP needs annotations no other dataset here provides. Its failure *mode* is characterised: it abstains rather than hallucinating. |
-| Alert delivery endpoints | Routing, grouping, and inhibition are configured and validated with `amtool`. The webhook and PagerDuty keys belong in a secret manager, not a repository. |
-| Kubernetes manifests not applied to a live cluster | Validated against real 1.30 API schemas with `kubeconform --strict` (10/10 resources), which is a smaller claim than "deployed and working". |
-| Only one model version is built | Versioning is resolved from the artefact layout and a second version needs no code change, but the pipeline produces `v1` only. There is no second set of weights in this repository to demonstrate a live rollout against. |
+| Production Slack/PagerDuty keys | Local delivery runs through `docker-compose.alerts.yml` and the webhook sink. Cloud credentials belong in a secret manager. |
 
 ## Documentation
 
@@ -670,6 +667,7 @@ development and how each was caught.
 | [Load test](benchmarks/load-test.md) | End-to-end latency through the full stack under concurrency |
 | [Memory profile](benchmarks/memory.md) | Resident cost per model, peak allocation per request |
 | [OpenAPI spec](docs/openapi.json) | Exported schema; also served live at `/openapi.json` |
+| [Postman collection](docs/postman/ml-api.postman_collection.json) | Auth, classify, detect, similar, batch, health |
 | [Documentation index](docs/README.md) | All results in one place, and what is not done |
 
 Eleven silent bugs found during development are written up in
@@ -704,7 +702,7 @@ layout that made the versioning claim checkable.
 | `model-quality` | Validates the committed baseline, then gates on metric regressions |
 | `docs-contract` | Fails if `docs/openapi.json` or the generated benchmark tables have drifted |
 | `security` | `pip-audit` (advisory) and a blocking secret scan |
-| `docker` | Builds both images and asserts non-root, no torch, under 1.5 GB, plus kubeconform / promtool / amtool / Compose validation |
+| `docker` | Builds images, asserts hardening, validates kube/prom/amtool/Compose, applies manifests to kind, and runs Compose E2E |
 
 ## Licence
 

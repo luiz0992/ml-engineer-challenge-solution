@@ -455,6 +455,29 @@ class ModelService:
     def get_embedder(self, version: str | None = None) -> LoadedModel:
         return self.get("tiny-imagenet-embedder", version)
 
+    def get_for_backend(
+        self, name: str, version: str | None, backend: InferenceBackend | None
+    ) -> LoadedModel:
+        """Resolve a model, optionally requiring a specific runtime.
+
+        Used when a caller pins ``?backend=onnx-int8``. The default path
+        still serves FP32; INT8 is available, measured, and opt-in, because
+        forcing it on every request would silently spend the accuracy the
+        calibration study documented.
+        """
+        model = self.get(name, version)
+        if backend is None or model.backend is backend:
+            return model
+        raise ModelNotFoundError(
+            f"Model {name!r} version {model.version!r} is loaded as "
+            f"{model.backend.value}, not {backend.value}. Set "
+            f"INFERENCE_BACKEND={backend.value} to serve that runtime.",
+            details={
+                "requested_backend": backend.value,
+                "loaded_backend": model.backend.value,
+            },
+        )
+
     def load_embedder(
         self,
         *,
@@ -464,20 +487,10 @@ class ModelService:
     ) -> LoadedModel:
         """Load the embedding model backing similarity search.
 
-        Shares the classifier's label list: the embedder is the same backbone
-        with its head removed, so an indexed image's class is named from the
-        same mapping.
+        Shares the Tiny-ImageNet label list so an indexed image's class is
+        named from the same mapping as classification.
         """
         artifacts = self.settings.artifacts_dir
-        artifact = resolve_versioned_artifact(artifacts / "onnx", "embedder_fp32.onnx", version)
-
-        if not artifact.exists():
-            raise ModelUnavailableError(
-                "Embedding artefacts not found. Export them with "
-                "`python scripts/prepare_artifacts.py --with-similarity`.",
-                details={"expected": str(artifact)},
-            )
-
         metadata = self._read_classifier_metadata(artifacts, version)
 
         preferred = self.settings.inference_backend
@@ -486,10 +499,24 @@ class ModelService:
             if self.settings.enable_graceful_degradation
             else (preferred,)
         )
-        chain = tuple(c for c in chain if c is not InferenceBackend.ONNX_INT8)
+        # INT8 is served only when it is the preferred backend. Falling back
+        # to it from FP32 would spend the 50% recall drop the calibration
+        # study measured, silently.
+        if preferred is not InferenceBackend.ONNX_INT8:
+            chain = tuple(c for c in chain if c is not InferenceBackend.ONNX_INT8)
 
         failures: list[str] = []
         for candidate in chain:
+            artifact = resolve_versioned_artifact(
+                artifacts / "onnx",
+                "embedder_int8.onnx"
+                if candidate is InferenceBackend.ONNX_INT8
+                else "embedder_fp32.onnx",
+                version,
+            )
+            if not artifact.exists():
+                failures.append(f"{candidate.value}: artefact not found")
+                continue
             try:
                 session, input_name = self._create_session(artifact, candidate)
                 self._warmup(session, input_name, metadata["image_size"], candidate)
@@ -536,17 +563,15 @@ class ModelService:
         is absent.
         """
         artifacts = self.settings.artifacts_dir
-        artifact = resolve_versioned_artifact(artifacts / "onnx", "detector_fp32.onnx", version)
         labels_path = resolve_versioned_metadata(artifacts, "detection_labels.json", version)
-
-        if not artifact.exists() or labels_path is None:
+        if labels_path is None:
             raise ModelUnavailableError(
                 "Detection artefacts not found. Export them with "
                 "`python scripts/prepare_artifacts.py --with-detection`.",
                 details={
                     "expected": [
-                        str(artifact),
-                        str(labels_path or artifacts / "onnx" / version / "detection_labels.json"),
+                        str(artifacts / "onnx" / version / "detector_fp32.onnx"),
+                        str(artifacts / "onnx" / version / "detection_labels.json"),
                     ]
                 },
             )
@@ -555,19 +580,29 @@ class ModelService:
         id2label = {int(k): v for k, v in metadata["id2label"].items()}
         class_names = [id2label.get(i, str(i)) for i in range(metadata["num_classes"])]
 
-        # Detection runs on the same ONNX backends as the classifier; the
-        # fallback chain is shared.
         preferred = self.settings.inference_backend
         chain = (
             _FALLBACK_CHAINS.get(preferred, (preferred,))
             if self.settings.enable_graceful_degradation
             else (preferred,)
         )
-        # INT8 is not exported for the detector, so it is not a candidate.
-        chain = tuple(c for c in chain if c is not InferenceBackend.ONNX_INT8)
+        # INT8 is served only when requested. The calibration study measured an
+        # 87% mAP collapse, so it must never be a silent fallback from FP32.
+        if preferred is not InferenceBackend.ONNX_INT8:
+            chain = tuple(c for c in chain if c is not InferenceBackend.ONNX_INT8)
 
         failures: list[str] = []
         for candidate in chain:
+            artifact = resolve_versioned_artifact(
+                artifacts / "onnx",
+                "detector_int8.onnx"
+                if candidate is InferenceBackend.ONNX_INT8
+                else "detector_fp32.onnx",
+                version,
+            )
+            if not artifact.exists():
+                failures.append(f"{candidate.value}: artefact not found")
+                continue
             try:
                 session, input_name = self._create_session(artifact, candidate)
                 self._warmup(session, input_name, metadata["image_size"], candidate, output_ndim=3)

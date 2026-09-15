@@ -6,6 +6,7 @@ import time
 
 from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
 
+from api.config import InferenceBackend
 from api.dependencies import (
     get_correlation_id,
     get_experiment_registry,
@@ -43,6 +44,14 @@ async def classify_image(
     model_version: str | None = Query(
         default=None, description="Pin a model version. Defaults to the active one."
     ),
+    backend: InferenceBackend | None = Query(
+        default=None,
+        description=(
+            "Pin an inference runtime (onnx, onnx-int8, tensorrt). Ignored unless "
+            "ALLOW_BACKEND_OVERRIDE is enabled. INT8 is measured and available; "
+            "it is not the default because it costs 5.4pp of top-1."
+        ),
+    ),
     include_probabilities: bool = Query(default=True),
     use_cache: bool = Query(default=True, description="Set false to bypass the result cache."),
     principal: Principal = Depends(authenticate),
@@ -78,6 +87,7 @@ async def classify_image(
             correlation_id=correlation_id,
             top_k_results=top_k,
             model_version=model_version,
+            backend=backend if inference.settings.allow_backend_override else None,
             include_probabilities=include_probabilities,
             use_cache=use_cache,
             user_id=principal.user_id,

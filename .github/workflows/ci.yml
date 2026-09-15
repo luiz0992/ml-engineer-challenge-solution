@@ -201,10 +201,11 @@ jobs:
           uv sync --extra dev --frozen
           uv pip install --index-url https://download.pytorch.org/whl/cpu \
             torch torchvision
+          uv pip install timm accelerate transformers hydra-core omegaconf
 
       - name: Run equivalence tests
         run: |
-          uv run pytest tests/unit/test_image_processing.py -v
+          uv run pytest tests/unit/test_image_processing.py tests/unit/test_training.py -v
 
       - name: Fail if the equivalence tests were skipped
         # The point of this job is that these tests actually execute. A skip
@@ -212,7 +213,7 @@ jobs:
         # like a pass.
         run: |
           set -euo pipefail
-          output=$(uv run pytest tests/unit/test_image_processing.py -q -rs 2>&1)
+          output=$(uv run pytest tests/unit/test_image_processing.py tests/unit/test_training.py -q -rs 2>&1)
           echo "$output"
           if echo "$output" | grep -qi "skipped"; then
             echo "::error::Preprocessing equivalence tests were skipped, not run."
@@ -354,7 +355,7 @@ jobs:
   docker:
     name: Docker build
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     # Only after the fast checks pass: an image build is the most expensive
     # job here and there is no point building code that fails to lint.
     needs: [lint]
@@ -471,6 +472,10 @@ jobs:
             --entrypoint amtool prom/alertmanager:v0.28.0 \
             check-config /etc/alertmanager/alertmanager.yml
 
+          docker run -v "$PWD/monitoring/alertmanager:/etc/alertmanager:ro" --rm \
+            --entrypoint amtool prom/alertmanager:v0.28.0 \
+            check-config /etc/alertmanager/alertmanager.local.yml
+
       - name: Verify every service is bounded and probed
         # Resource limits and health checks are easy to add for the services
         # someone thought about and easy to forget for the rest. `ml-api` and
@@ -542,3 +547,65 @@ jobs:
               -f docker-compose.yml -f docker-compose.prod.yml \
               config --quiet
           echo "Production stack is valid when secrets are supplied"
+
+          JWT_SECRET_KEY=ci POSTGRES_PASSWORD=ci \
+            docker compose --env-file /dev/null \
+              -f docker-compose.yml -f docker-compose.alerts.yml \
+              config --quiet
+          echo "Alerts overlay is valid"
+
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: mlchal
+          wait: 60s
+
+      - name: Apply Kubernetes manifests
+        run: |
+          set -euo pipefail
+          kubectl apply -f deploy/kubernetes/api.yaml --dry-run=server
+          kubectl apply -f deploy/kubernetes/jobs.yaml --dry-run=server
+          kubectl apply -f deploy/kubernetes/
+          kubectl -n ml-api create secret generic ml-api-secrets \
+            --from-literal=JWT_SECRET_KEY=ci-not-a-real-secret \
+            --from-literal=POSTGRES_PASSWORD=ci \
+            --from-literal=POSTGRES_USER=mlapi \
+            --from-literal=POSTGRES_DB=mlapi \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n ml-api get deploy,hpa,cronjob,pdb,svc,pvc
+
+      - name: End-to-end against Compose
+        # The serving process refuses to start without a classifier. CI has no
+        # 87 MB trained weights, so a synthetic graph with the same interface
+        # is published first. That is the same trick the unit suite uses.
+        run: |
+          set -euo pipefail
+          docker tag mlchal-api:${{ github.sha }} mlchal-api:latest
+          docker tag mlchal-worker:${{ github.sha }} mlchal-worker:latest
+          docker tag mlchal-jobs:${{ github.sha }} mlchal-jobs:latest
+
+          docker run --rm -v "$PWD/models/artifacts:/app/models/artifacts" \
+            mlchal-api:${{ github.sha }} \
+            python -m scripts.prepare_synthetic_artifacts \
+              --artifacts-dir /app/models/artifacts
+
+          export JWT_SECRET_KEY=ci-not-a-real-secret
+          export POSTGRES_PASSWORD=ci
+          docker compose --env-file /dev/null up -d --no-build \
+            postgres redis migrate ml-api api-gateway
+
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/health/live >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8080/api/v1/health
+
+          docker run --rm --network host \
+            -e E2E_BASE_URL=http://127.0.0.1:8080 \
+            -v "$PWD:/src" -w /src \
+            python:3.12-slim-bookworm \
+            bash -c "pip install -q httpx pytest pillow numpy && pytest tests/e2e -o addopts= -m e2e -v"
+
+          docker compose --env-file /dev/null down -v

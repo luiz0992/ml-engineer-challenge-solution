@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1.7
+# Celery worker image. Same graph as the root Dockerfile `--target worker`.
+#
+#   docker build --target worker -t mlchal-worker:latest -f Dockerfile .
+FROM python:3.12-slim-bookworm AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.9.6 /uv /usr/local/bin/uv
+WORKDIR /build
+COPY pyproject.toml uv.lock README.md ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
+FROM python:3.12-slim-bookworm
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1001 app \
+    && useradd --system --uid 1001 --gid app --create-home --shell /usr/sbin/nologin app
+COPY --from=builder --chown=app:app /build/.venv /build/.venv
+ENV VIRTUAL_ENV=/build/.venv PATH="/build/.venv/bin:$PATH" PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY --chown=app:app api/ ./api/
+COPY --chown=app:app worker/ ./worker/
+COPY --chown=app:app models/__init__.py ./models/
+COPY --chown=app:app models/validation/ ./models/validation/
+COPY --chown=app:app scripts/ ./scripts/
+COPY --chown=app:app alembic.ini ./
+COPY --chown=app:app migrations/ ./migrations/
+RUN mkdir -p /app/models/artifacts && chown -R app:app /app
+USER app
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD celery -A worker.celery_app inspect ping -d celery@$HOSTNAME || exit 1
+CMD ["celery", "-A", "worker.celery_app", "worker", \
+     "--loglevel=info", "--concurrency=2", "--max-tasks-per-child=100"]

@@ -32,8 +32,8 @@ command beside it. Nothing is quoted from a publication.
 | Classifier | Calibration (ECE) | 0.0852, underconfident | |
 | Detector | mAP@[.5:.95] (COCO val2017) | **0.500** | `scripts/evaluate_detector.py` |
 | Detector | mAP small / large | 0.347 / 0.627 | |
-| Embedder | Precision@5 (1,000 random queries, 198/200 classes covered) | **79.7%** | `scripts/evaluate_models.py` |
-| Embedder | Per-class spread | sd 19.2pp | |
+| Embedder | Precision@5 (1,000 random queries, 198/200 classes covered) | **77.0%** | `scripts/evaluate_models.py` |
+| Embedder | Per-class spread | sd 20.3pp | |
 
 ### Inference performance
 
@@ -60,7 +60,7 @@ embedder. See [the analysis](../benchmarks/ANALYSIS.md) §2.
 
 | | |
 | --- | --- |
-| Tests | 419 (91.56% coverage), plus 12 performance tests |
+| Tests | 441 (94.1% coverage), plus 12 performance tests |
 | Type checking | mypy strict across 98 files, tests included |
 | Serving image | 701 MB, non-root, no torch; jobs image 863 MB |
 | CI jobs | 7 — lint, test, equivalence, model quality, docs contract, security, docker |
@@ -85,7 +85,7 @@ ran, the tests passed, nothing raised.
 | Retention regex matched nothing | Testing the migration against real Postgres | Retention would silently never run, forever |
 | Alert on a metric nothing exported | Writing the invariant test | Permanently green; looked like coverage |
 | CI skipped 33 tests including the equivalence guard | Cloning the repo fresh and running it | The project's most important test never ran in CI |
-| Cherry-picked 92% retrieval precision | Measuring 1,000 random queries instead of 5 hand-picked classes | Real figure is 79.7% |
+| Cherry-picked 92% retrieval precision | Measuring 1,000 random queries instead of 5 hand-picked classes | Contrastive index is 77.0% |
 | `Sequence[float]` on functions designed for arrays | Enabling mypy on the tests | Every realistic caller was a type error nothing checked |
 | A mypy config section for a check that never ran | Reading the "unused section" note as a signal | Tests had never been type-checked at all |
 | Audit shutdown lost the batch it was committing | Running the audit tests against a real Postgres | Records buffered at a rolling deploy vanished with no error and no counter |
@@ -124,9 +124,5 @@ Stated plainly in [technical write-up §12](technical-writeup.md#12-what-is-stil
 - **Detector accuracy off-distribution** is unmeasured — mAP needs annotations
   no other dataset here provides. Its failure *mode* is characterised: it
   abstains rather than hallucinating.
-- **Alert delivery endpoints** are deployment-specific. A webhook URL in a
-  repository is a committed credential; the routing around it is configured
-  and validated.
-- **Kubernetes manifests have not been applied to a live cluster.** They
-  validate against real 1.30 API schemas, which is a smaller claim than
-  "deployed and working".
+- **Production Slack/PagerDuty keys** are deployment-specific. Local and CI
+  delivery runs through `docker-compose.alerts.yml` and the webhook sink.

@@ -1,0 +1,17 @@
+# Second classifier version. Same architecture, different seed and a slightly
+# stronger regulariser, so the weights are genuinely different from v1.
+#
+#   uv run python -m models.training.train --config-name train_classifier_v2
+defaults:
+  - train_classifier
+  - _self_
+
+experiment_name: tiny-imagenet-classification-v2
+run_name: classifier-v2
+
+model:
+  drop_path_rate: 0.15
+
+training:
+  epochs: 2
+  seed: 2026

@@ -21,6 +21,7 @@ Usage::
     uv run python scripts/evaluate_models.py
     uv run python scripts/evaluate_models.py --classifier-samples 10000
     uv run python scripts/evaluate_models.py --skip-similarity
+    uv run python scripts/evaluate_models.py --skip-classifier
 """
 
 from __future__ import annotations
@@ -63,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--skip-similarity", action="store_true")
+    parser.add_argument(
+        "--skip-classifier",
+        action="store_true",
+        help="Reuse the classifier section already in --output and only re-measure retrieval.",
+    )
     parser.add_argument("--output", type=Path, default=Path("benchmarks/evaluation.json"))
     return parser
 
@@ -295,9 +301,19 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S"
     )
 
-    report: dict[str, Any] = {
-        "classifier": evaluate_classifier(args.artifacts_dir, args.data_dir, args)
-    }
+    report: dict[str, Any] = {}
+    if args.output.exists():
+        try:
+            report = json.loads(args.output.read_text())
+        except json.JSONDecodeError:
+            report = {}
+
+    if not args.skip_classifier:
+        report["classifier"] = evaluate_classifier(args.artifacts_dir, args.data_dir, args)
+    elif "classifier" not in report:
+        raise SystemExit(
+            "No classifier section in the existing report. Re-run without --skip-classifier."
+        )
 
     if not args.skip_similarity:
         similarity = evaluate_similarity(args.artifacts_dir, args.data_dir, args)
