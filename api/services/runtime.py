@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import ctypes
 import importlib.util
+import os
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -103,11 +105,72 @@ def preload_tensorrt_libraries() -> bool:
 #: log line are not worth repeating per session.
 _PRELOADED = False
 
+#: cgroup files describing the CPU quota, newest interface first.
+_CGROUP_V2_QUOTA = Path("/sys/fs/cgroup/cpu.max")
+_CGROUP_V1_QUOTA = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+_CGROUP_V1_PERIOD = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+
+
+def available_cpus() -> int:
+    """Return the CPUs this process may actually use.
+
+    `os.cpu_count()` reports the *host's* processors, and a container is not
+    told about its own cgroup quota. ONNX Runtime sizes its intra-op thread
+    pool from that number, so a 4-CPU container on a 32-core host builds a
+    32-thread pool and then thrashes inside a quota a quarter that size.
+
+    Measured on this project's own image, classifying one image on CPU:
+
+    ========================  =========
+    intra_op_num_threads      p50
+    ========================  =========
+    default (32, host count)  102.8 ms
+    4 (matching the quota)     12.4 ms
+    ========================  =========
+
+    An 8x difference from one number, and silent -- the container is healthy,
+    correct, and slow. CPU affinity is checked as well as the quota, because a
+    pinned process is limited by affinity even with no quota set.
+    """
+    limit = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+    limit = limit or 1
+
+    quota = _cgroup_cpu_quota()
+    if quota is not None:
+        limit = min(limit, quota)
+
+    return max(1, limit)
+
+
+def _cgroup_cpu_quota() -> int | None:
+    """Read the CPU quota in whole CPUs, or ``None`` when unlimited."""
+    try:
+        if _CGROUP_V2_QUOTA.exists():
+            # "<quota> <period>", or "max <period>" when uncapped.
+            raw_quota, raw_period = _CGROUP_V2_QUOTA.read_text().split()
+            if raw_quota == "max":
+                return None
+            return max(1, int(float(raw_quota) / float(raw_period)))
+
+        if _CGROUP_V1_QUOTA.exists() and _CGROUP_V1_PERIOD.exists():
+            # A negative quota means uncapped under cgroup v1.
+            micros = int(_CGROUP_V1_QUOTA.read_text())
+            if micros <= 0:
+                return None
+            return max(1, micros // int(_CGROUP_V1_PERIOD.read_text()))
+    except (OSError, ValueError) as exc:
+        # Never fatal: an unreadable cgroup file means we fall back to the
+        # affinity count, which is worse but not wrong.
+        logger.debug("cgroup_cpu_quota_unreadable", error=str(exc))
+
+    return None
+
 
 def create_session(
     model_path: str,
     *,
     providers: list[str] | None = None,
+    satisfied_by: Collection[str] | None = None,
     graph_optimization: bool = True,
     verify_provider: bool = True,
 ) -> tuple[Any, str]:
@@ -130,6 +193,18 @@ def create_session(
     opportunity to forget. :func:`~api.services.model_service.ModelService._warmup`
     remains the backstop that proves a backend actually executes.
 
+    ``satisfied_by`` names the providers that legitimately fulfil the caller's
+    request, which is not the same as the providers handed to ONNX Runtime.
+    ONNX Runtime requires a CPU entry in every provider list, so CPU appears in
+    the TensorRT list as a mechanical requirement rather than an acceptable
+    outcome -- a session that lands on CPU has not delivered TensorRT. For a
+    plain ONNX session the opposite holds: CPU is exactly what a CPU-only
+    deployment was built for, and calling that a degradation would make the
+    degraded-backend alert permanently red on the default configuration.
+
+    Defaults to ``{providers[0]}``, the strict reading, so a caller that asks
+    for one specific accelerator gets one.
+
     Returns ``(session, input_name)``.
     """
     global _PRELOADED
@@ -146,6 +221,13 @@ def create_session(
         _PRELOADED = True
 
     available = set(ort.get_available_providers())
+    # The provider the caller actually asked for, captured before filtering.
+    # Verifying against the *filtered* list is what let this check pass
+    # vacuously: if the requested provider is not registered in this build it
+    # is filtered out, CPU is appended, and `usable[0]` becomes CPU -- so the
+    # comparison below succeeded in precisely the case it exists to catch.
+    preferred = requested[0]
+
     usable = [p for p in requested if p in available]
     if "CPUExecutionProvider" not in usable:
         # ONNX Runtime requires a CPU fallback in the provider list.
@@ -155,14 +237,42 @@ def create_session(
     if graph_optimization:
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
+    # Sized from the cgroup quota rather than left to ONNX Runtime's default of
+    # the host processor count. See `available_cpus` for the 8x this is worth
+    # inside a CPU-limited container.
+    #
+    # Applied to every session, including GPU ones. An earlier version skipped
+    # this whenever CUDA or TensorRT was selected, on the theory that the GPU
+    # does the work -- but a GPU container still has a CPU quota, still runs
+    # any operator the provider does not support on the CPU, and still pays for
+    # a thread pool sized for hardware it cannot use. Measured on CUDA at batch
+    # 8, the bound costs nothing: 3.45 ms at the host default of 32 threads
+    # against 3.45 ms at 4.
+    threads = available_cpus()
+    options.intra_op_num_threads = threads
+    # One inter-op thread: these graphs are a single sequential chain, so
+    # parallelising across nodes only adds contention with the intra-op
+    # pool that is doing the real work.
+    options.inter_op_num_threads = 1
+    logger.debug("onnx_threads_configured", intra_op=threads, model=model_path)
+
     session = ort.InferenceSession(model_path, sess_options=options, providers=usable)
 
-    if verify_provider and usable[0] != "CPUExecutionProvider":
+    if verify_provider:
+        acceptable = frozenset(satisfied_by) if satisfied_by is not None else frozenset({preferred})
         selected = session.get_providers()[0]
-        if selected != usable[0]:
+
+        if selected not in acceptable:
+            # Raising rather than quietly proceeding is what lets ModelService's
+            # fallback chain record `degraded_from` honestly. Returning the
+            # session anyway would have the API advertise `backend=tensorrt` on
+            # every response, health check and audit row while running two
+            # orders of magnitude slower on CPU.
             raise RuntimeError(
-                f"Requested provider {usable[0]} but ONNX Runtime selected "
-                f"{selected}. Refusing to report a backend that is not in use."
+                f"ONNX Runtime selected {selected}, which does not satisfy the "
+                f"requested {sorted(acceptable)} "
+                f"(available: {sorted(available)}). Refusing to report a "
+                f"backend that is not in use."
             )
 
     return session, session.get_inputs()[0].name

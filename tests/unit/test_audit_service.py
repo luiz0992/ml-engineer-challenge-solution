@@ -278,3 +278,181 @@ class TestIntegrationWithInference:
         response = await service.classify(make_image_bytes(), correlation_id="c")
 
         assert response.predictions
+
+
+class _SlowSessionFactory(_CapturingSessionFactory):
+    """A session whose commit takes long enough to be interrupted.
+
+    The difference from `_CapturingSessionFactory` is the whole point: with an
+    instantaneous commit there is no window in which shutdown can land, so the
+    fast double proves the writer drains correctly when in fact it never had a
+    chance not to.
+    """
+
+    def __init__(self, delay: float = 0.2) -> None:
+        super().__init__()
+        self.delay = delay
+
+    async def commit(self) -> None:
+        await asyncio.sleep(self.delay)
+        self.commits += 1
+
+
+class TestShutdownDoesNotLoseInFlightRecords:
+    """Regression guard for a batch lost between the queue and the database.
+
+    The writer takes a batch out of the queue into a local list before
+    committing it. Shutdown used to cancel the writer outright, so a commit
+    still in progress was abandoned: the records were no longer in the queue,
+    so draining the queue could not recover them, and they disappeared with no
+    error and no counter incremented.
+
+    That is exactly the gap-around-deploys failure `stop` exists to prevent,
+    and it was invisible to every test using an instantaneous fake commit. It
+    was found by running the suite against a real Postgres.
+    """
+
+    async def test_records_survive_a_shutdown_during_commit(self) -> None:
+        factory = _SlowSessionFactory(delay=0.2)
+        service = AuditService(factory, flush_interval=3600.0)
+        await service.start()
+
+        for i in range(5):
+            service.record(**_record(correlation_id=f"r{i}"))
+
+        # Let the writer dequeue the batch and start committing, so shutdown
+        # arrives mid-write rather than while it waits on an empty queue.
+        await asyncio.sleep(0.05)
+        assert service._queue.empty(), "the writer should hold the batch by now"
+
+        await service.stop()
+
+        persisted = [obj.correlation_id for obj in factory.written]
+        assert sorted(persisted) == [f"r{i}" for i in range(5)]
+        assert service.stats.written == 5
+
+    async def test_shutdown_during_commit_does_not_duplicate(self) -> None:
+        """Recovering the in-flight batch must not write it twice.
+
+        The first attempt at the fix recovered the batch unconditionally, which
+        re-inserted it whenever the commit had already succeeded -- turning a
+        lost batch into a duplicated one on every ordinary shutdown.
+        """
+        factory = _SlowSessionFactory(delay=0.2)
+        service = AuditService(factory, batch_size=10, flush_interval=3600.0)
+        await service.start()
+
+        for i in range(25):
+            service.record(**_record(correlation_id=f"r{i}"))
+
+        await asyncio.sleep(0.05)
+        await service.stop()
+
+        persisted = [obj.correlation_id for obj in factory.written]
+        assert len(persisted) == 25
+        assert len(set(persisted)) == 25
+
+    async def test_stop_returns_promptly_despite_a_long_flush_interval(self) -> None:
+        """Shutdown must not wait out the flush interval.
+
+        The writer blocks on the queue for up to `flush_interval`. If shutdown
+        simply waited for that, a service configured for infrequent flushes
+        would hang on every deploy.
+        """
+        factory = _CapturingSessionFactory()
+        service = AuditService(factory, flush_interval=3600.0)
+        await service.start()
+        await asyncio.sleep(0.01)
+
+        started = asyncio.get_running_loop().time()
+        await service.stop()
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert elapsed < 1.0
+
+
+class TestLifecycleIsRepeatable:
+    """`stop()` must leave the service usable, and must always drain.
+
+    All three of these came from one missing `self._stopping.clear()`. None is
+    reachable through `api/main.py`, which starts and stops exactly once — they
+    are broken contracts rather than live outages, and the kind that surface
+    the first time someone adds a reload endpoint or a second shutdown path.
+    """
+
+    async def test_flush_waits_for_a_commit_in_flight(self) -> None:
+        """`flush()` must not return before the writer's current batch lands.
+
+        The writer takes a batch out of the queue before committing it, so
+        draining the queue alone can miss records that are mid-write. Invisible
+        against a double whose `commit` does not suspend, which is how the
+        shutdown version of this bug survived.
+        """
+        factory = _SlowSessionFactory(delay=0.2)
+        service = AuditService(factory, flush_interval=0.01)
+        await service.start()
+        try:
+            service.record(**_record(correlation_id="in-flight"))
+            await asyncio.sleep(0.05)
+            assert service._queue.empty(), "the writer should be committing by now"
+
+            await service.flush()
+
+            assert [o.correlation_id for o in factory.written] == ["in-flight"]
+        finally:
+            await service.stop()
+
+    async def test_stop_twice_still_drains_the_second_time(self) -> None:
+        factory = _CapturingSessionFactory()
+        service = AuditService(factory, flush_interval=3600.0)
+        await service.start()
+
+        service.record(**_record(correlation_id="first"))
+        await service.stop()
+
+        service.record(**_record(correlation_id="second"))
+        await service.stop()
+
+        assert [o.correlation_id for o in factory.written] == ["first", "second"]
+
+    async def test_the_service_can_be_restarted(self) -> None:
+        """A restarted writer must not exit after one pass.
+
+        With the stop flag left set, the new writer returns immediately and the
+        service then queues records forever without writing any — healthy from
+        the outside, auditing nothing.
+        """
+        factory = _CapturingSessionFactory()
+        service = AuditService(factory, flush_interval=0.01)
+
+        await service.start()
+        service.record(**_record(correlation_id="before"))
+        await service.stop()
+
+        await service.start()
+        try:
+            # Let the restarted writer complete a pass on an empty queue first.
+            # Recording immediately would be caught by that very pass even from
+            # a writer that then exits, so the bug would survive the test.
+            await asyncio.sleep(0.05)
+
+            for index in range(3):
+                service.record(**_record(correlation_id=f"after-{index}"))
+            await asyncio.sleep(0.1)
+
+            # Asserted before `stop()`: a stopped writer's records would still
+            # be recovered by the drain in `stop()`, which would mask a writer
+            # that had silently died.
+            assert service.stats.written == 4, (
+                "the restarted writer exited after one pass and stopped writing"
+            )
+        finally:
+            await service.stop()
+
+        assert sorted(o.correlation_id for o in factory.written) == [
+            "after-0",
+            "after-1",
+            "after-2",
+            "before",
+        ]
+        assert service.stats.written == 4

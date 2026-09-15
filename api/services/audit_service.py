@@ -55,6 +55,11 @@ DEFAULT_BATCH_SIZE = 50
 #: persists its audit trail promptly.
 DEFAULT_FLUSH_INTERVAL_SECONDS = 2.0
 
+#: How long shutdown waits for the writer to commit its in-flight batch
+#: before giving up on it. Bounded so an unresponsive database cannot hold
+#: a rolling deploy open indefinitely.
+SHUTDOWN_TIMEOUT = 10.0
+
 
 @dataclass(slots=True)
 class AuditStats:
@@ -95,6 +100,10 @@ class AuditService:
         self._batch_size = batch_size
         self._flush_interval = flush_interval
         self._task: asyncio.Task[None] | None = None
+        self._stopping = asyncio.Event()
+        #: Held by the writer while a batch is being committed, so `flush`
+        #: can wait for an in-flight batch rather than racing it.
+        self._write_lock = asyncio.Lock()
         self.stats = AuditStats()
 
     @property
@@ -111,17 +120,38 @@ class AuditService:
     async def stop(self) -> None:
         """Flush outstanding records and stop the writer.
 
-        Draining on shutdown matters: without it, every record buffered at the
-        moment of a rolling deploy is lost, and audit gaps cluster precisely
+        The writer is *asked* to stop rather than cancelled. It dequeues a
+        batch into a local list before committing it, so cancelling outright
+        would leave that batch in neither the queue nor the database, and the
+        drain below could not recover it. Records buffered at the moment of a
+        rolling deploy would be lost and audit gaps would cluster precisely
         around deploys, which is when they are most needed.
-        """
-        if self._task is None:
-            return
 
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
-        self._task = None
+        Cancellation remains the fallback, bounded by `SHUTDOWN_TIMEOUT`, so a
+        wedged database delays shutdown by a few seconds rather than
+        indefinitely. That path can still lose the in-flight batch; losing it
+        after a ten-second timeout is a far narrower window than losing it on
+        every clean shutdown.
+        """
+        # Drain unconditionally, even when there is no writer to stop. A
+        # second `stop()` would otherwise return here and silently abandon
+        # anything queued since the first one.
+        if self._task is not None:
+            self._stopping.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(self._task), timeout=SHUTDOWN_TIMEOUT)
+            except TimeoutError:
+                logger.warning("audit_writer_shutdown_timeout", seconds=SHUTDOWN_TIMEOUT)
+                self._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._task
+            finally:
+                self._task = None
+                # Cleared so the service can be started again. Left set, a
+                # restarted writer exits after one pass and the service then
+                # queues records forever without writing any of them --
+                # healthy-looking and auditing nothing.
+                self._stopping.clear()
 
         await self._drain()
         logger.info("audit_writer_stopped", **self.stats.as_dict())
@@ -151,32 +181,64 @@ class AuditService:
                 self.stats.queued += 1
 
     async def _run(self) -> None:
-        """Collect records and flush them in batches."""
-        batch: list[dict[str, Any]] = []
-
+        """Collect records and flush them in batches until asked to stop."""
         while True:
-            try:
-                # Wait for the first record, then drain whatever else is ready.
-                # This gives low latency when busy and no busy-wait when idle.
-                first = await asyncio.wait_for(self._queue.get(), timeout=self._flush_interval)
-                batch.append(first)
-
-                while len(batch) < self._batch_size:
-                    try:
-                        batch.append(self._queue.get_nowait())
-                    except asyncio.QueueEmpty:
-                        break
-            except TimeoutError:
-                pass
-            except asyncio.CancelledError:
-                raise
-
+            batch = await self._collect()
             if batch:
-                await self._write(batch)
-                batch = []
+                async with self._write_lock:
+                    await self._write(batch)
+
+            # Checked after the write, so the batch already in hand is
+            # committed before the writer exits.
+            if self._stopping.is_set():
+                return
+
+    async def _collect(self) -> list[dict[str, Any]]:
+        """Wait for records, returning as soon as there is work or a reason to stop.
+
+        Returns when a record arrives, the flush interval elapses, or shutdown
+        is requested -- whichever comes first. Racing the queue against the
+        stop event is what lets `stop` return promptly regardless of how long
+        the flush interval is; waiting on the queue alone would block for up to
+        a full interval after the service had already been told to shut down.
+        """
+        getter: asyncio.Task[dict[str, Any]] = asyncio.ensure_future(self._queue.get())
+        stopper: asyncio.Task[bool] = asyncio.ensure_future(self._stopping.wait())
+        try:
+            await asyncio.wait(
+                {getter, stopper},
+                timeout=self._flush_interval,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            stopper.cancel()
+
+        batch: list[dict[str, Any]] = []
+        if getter.done() and not getter.cancelled():
+            batch.append(getter.result())
+        else:
+            # Cancelling a pending Queue.get is safe: asyncio removes the
+            # waiter and hands the slot to the next one rather than dropping a
+            # record.
+            getter.cancel()
+
+        # Take whatever else is already waiting. This gives low latency when
+        # busy and no busy-wait when idle.
+        while len(batch) < self._batch_size:
+            try:
+                batch.append(self._queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+
+        return batch
 
     async def _drain(self) -> None:
-        """Write everything still queued."""
+        """Write everything still queued.
+
+        Only the queue. The batch the writer is currently committing is
+        recovered by `stop`, which runs after the writer has halted -- doing
+        it here would race a live writer and insert the same batch twice.
+        """
         batch: list[dict[str, Any]] = []
         while not self._queue.empty():
             with contextlib.suppress(asyncio.QueueEmpty):
@@ -212,5 +274,19 @@ class AuditService:
             )
 
     async def flush(self) -> None:
-        """Write everything queued. Used by tests and shutdown."""
+        """Write everything queued, including any batch mid-commit.
+
+        Draining the queue alone is not enough: the writer takes a batch out of
+        the queue before committing it, so a caller that drains and then reads
+        can miss records that were in flight. That gap is invisible against a
+        double whose `commit` does not suspend, and appears the moment a real
+        driver is used -- which is how the shutdown version of this bug was
+        found.
+
+        `_write_lock` is held by the writer for the duration of its commit, so
+        acquiring it here waits for the current batch to land before draining
+        whatever arrived behind it.
+        """
+        async with self._write_lock:
+            pass
         await self._drain()

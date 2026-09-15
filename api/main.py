@@ -48,7 +48,7 @@ from api.services.cache_service import CacheService
 from api.services.detection_service import DetectionService
 from api.services.experiment_service import ExperimentRegistry
 from api.services.inference_service import InferenceService
-from api.services.model_service import ModelService
+from api.services.model_service import ModelService, discover_versions
 from api.services.similarity_service import SimilarityIndex, SimilarityService
 from api.utils.validators import configure_pillow_limits
 
@@ -200,6 +200,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         backend=model.backend.value,
         degraded=model.degraded_from is not None,
     )
+
+    # Any additional versions present on disk are loaded alongside the default,
+    # so a second version is a deployment concern rather than a code change.
+    # They are not made active: a new version becomes reachable by pinning or
+    # by an experiment, never by the mere act of shipping it.
+    for extra in discover_versions(settings.artifacts_dir / "onnx"):
+        if extra == model.version:
+            continue
+        try:
+            alternate = model_service.load_classifier(version=extra, make_active=False)
+        except Exception as exc:
+            logger.warning("model_version_unavailable", version=extra, error=str(exc))
+            continue
+        record_model_loaded(
+            model=alternate.name,
+            version=alternate.version,
+            backend=alternate.backend.value,
+            degraded=alternate.degraded_from is not None,
+        )
     # The detector is optional: a deployment may serve classification only, and
     # failing startup over it would take down a working service.
     detection_service = None
@@ -272,7 +291,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Drain the audit queue before closing the engine, so records buffered
         # at the moment of a rolling deploy are persisted rather than lost --
         # audit gaps would otherwise cluster exactly around deploys.
-        await audit_service.stop()
+        #
+        # Guarded because it runs first: `stop()` waits on the writer task, and
+        # anything that propagated out of it would skip the two releases below
+        # and leak a connection pool on every shutdown. Losing the tail of the
+        # audit trail is the lesser failure.
+        try:
+            await audit_service.stop()
+        except Exception:
+            logger.exception("audit_shutdown_failed", impact="buffered records may be lost")
+
         if engine is not None:
             await engine.dispose()
         if redis is not None:
