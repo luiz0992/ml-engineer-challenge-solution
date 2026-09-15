@@ -1,0 +1,86 @@
+{
+  "loading": {
+    "baseline_rss_mb": 909.9,
+    "runtime_init_mb": 839.5,
+    "models": {
+      "classifier": {
+        "rss_delta_mb": 79.0,
+        "backend": "onnx",
+        "provider": "CUDAExecutionProvider",
+        "version": "v1"
+      },
+      "detector": {
+        "rss_delta_mb": 226.5,
+        "backend": "onnx",
+        "provider": "CUDAExecutionProvider",
+        "version": "v1"
+      },
+      "embedder": {
+        "rss_delta_mb": 87.6,
+        "backend": "onnx",
+        "provider": "CUDAExecutionProvider",
+        "version": "v1"
+      }
+    },
+    "total_rss_mb": 1303.0
+  },
+  "requests": {
+    "requests": 50,
+    "peak_alloc_mb": {
+      "mean": 1.791,
+      "p50": 1.793,
+      "p95": 1.802,
+      "max": 1.803
+    },
+    "rss_growth_mb": 0.2,
+    "top_allocations": [
+      {
+        "location": "inference_service.py:296",
+        "size_kb": 0.2,
+        "count": 3
+      },
+      {
+        "location": "inference_service.py:157",
+        "size_kb": 0.1,
+        "count": 2
+      },
+      {
+        "location": "validators.py:112",
+        "size_kb": 0.1,
+        "count": 1
+      },
+      {
+        "location": "inference_service.py:303",
+        "size_kb": 0.1,
+        "count": 4
+      },
+      {
+        "location": "inference_service.py:299",
+        "size_kb": 0.1,
+        "count": 1
+      }
+    ]
+  },
+  "scaling": [
+    {
+      "edge_px": 224,
+      "upload_kb": 44.5,
+      "peak_alloc_mb": 1.764
+    },
+    {
+      "edge_px": 512,
+      "upload_kb": 230.0,
+      "peak_alloc_mb": 1.765
+    },
+    {
+      "edge_px": 1024,
+      "upload_kb": 918.7,
+      "peak_alloc_mb": 1.765
+    },
+    {
+      "edge_px": 2048,
+      "upload_kb": 3671.5,
+      "peak_alloc_mb": 1.765
+    }
+  ]
+}

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import time
+import tracemalloc
 from typing import Any
 
 import numpy as np
@@ -163,6 +164,96 @@ class TestMemoryStability:
         growth_mb = process.memory_info().rss / 1024 / 1024 - before_mb
 
         assert growth_mb < 150, f"RSS grew {growth_mb:.0f} MB over 100 inferences"
+
+    async def test_peak_allocation_per_request_is_bounded(self, inference_service: Any) -> None:
+        """Peak Python-level allocation per classification.
+
+        Distinct from the RSS check above, and more useful for capacity
+        planning: the allocator holds freed memory, so RSS understates what a
+        burst of concurrent requests needs. Peak allocation is what decides how
+        many requests fit inside a memory limit at once.
+
+        Measured at roughly 1.8 MB for a 512x512 upload; 32 MB would mean a
+        full-resolution float copy is being materialised.
+        """
+        image = make_image_bytes(512, 512)
+
+        for _ in range(5):
+            await inference_service.classify(image, correlation_id="warmup", use_cache=False)
+
+        gc.collect()
+        tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            await inference_service.classify(image, correlation_id="peak", use_cache=False)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        peak_mb = peak / 1024 / 1024
+        assert peak_mb < 32, f"one classification peaked at {peak_mb:.1f} MB"
+
+    async def test_peak_allocation_does_not_track_upload_size(self, inference_service: Any) -> None:
+        """A 4x larger upload must not cost 4x the memory.
+
+        Images are resized to 224x224 before inference, so peak allocation
+        should be roughly flat across upload sizes. A peak that scales with the
+        input means a full-resolution array is being retained past the resize --
+        which is also how an oversized upload becomes a memory-exhaustion
+        vector rather than a validation error.
+        """
+
+        async def peak_for(edge: int) -> float:
+            image = make_image_bytes(edge, edge)
+            await inference_service.classify(image, correlation_id="warmup", use_cache=False)
+
+            gc.collect()
+            tracemalloc.start()
+            try:
+                tracemalloc.reset_peak()
+                await inference_service.classify(
+                    image, correlation_id=f"scale-{edge}", use_cache=False
+                )
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            return peak / 1024 / 1024
+
+        small = await peak_for(256)
+        large = await peak_for(1024)
+
+        # 1024x1024 is 16x the pixels of 256x256. Allowing 3x leaves generous
+        # room for decode buffers while still failing if the peak is
+        # proportional to the input.
+        assert large < small * 3, (
+            f"peak allocation grew from {small:.2f} MB to {large:.2f} MB for a "
+            f"16x larger upload; the full-resolution image is being retained"
+        )
+
+    async def test_cached_responses_do_not_accumulate(self, inference_service: Any) -> None:
+        """Repeatedly serving the same image must not grow the traced heap.
+
+        The cache is bounded by TTL rather than by size, so a per-request entry
+        that is never evicted would show up here as steady growth.
+        """
+        image = make_image_bytes(256, 256)
+        await inference_service.classify(image, correlation_id="warmup", use_cache=True)
+
+        gc.collect()
+        tracemalloc.start()
+        try:
+            before = tracemalloc.take_snapshot()
+            for index in range(50):
+                await inference_service.classify(
+                    image, correlation_id=f"cached-{index}", use_cache=True
+                )
+            gc.collect()
+            after = tracemalloc.take_snapshot()
+        finally:
+            tracemalloc.stop()
+
+        growth_kb = sum(s.size_diff for s in after.compare_to(before, "filename")) / 1024
+        assert growth_kb < 4096, f"traced heap grew {growth_kb:.0f} KB over 50 cached requests"
 
     def test_model_is_loaded_once_not_per_request(self, model_service: Any) -> None:
         """Repeated lookups must return the same session object.

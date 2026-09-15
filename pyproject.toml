@@ -157,6 +157,18 @@ ignore = [
 # objects they stand in for; ClassVar annotations would add noise without
 # changing behaviour.
 "tests/**" = ["S101", "S104", "S105", "S106", "ARG001", "ARG002", "RUF012"]
+# S311: the load generator picks images and batch sizes at random to avoid a
+# uniform workload. Nothing here is a secret, so a CSPRNG would only be slower.
+"tests/performance/locustfile.py" = [
+    "S101",
+    "S104",
+    "S105",
+    "S106",
+    "ARG001",
+    "ARG002",
+    "RUF012",
+    "S311",
+]
 # FastAPI route signatures declare dependencies that are injected for their
 # side effects (authentication, rate limiting) and query parameters that exist
 # to document the API contract. Starlette exception handlers must accept
@@ -193,7 +205,7 @@ addopts = [
 ]
 markers = [
     "unit: fast, fully isolated tests with no external dependencies",
-    "integration: requires Postgres/Redis (spun up via testcontainers)",
+    "integration: full request path; database tests need a real Postgres (POSTGRES_HOST or testcontainers)",
     "performance: latency and memory benchmarks; excluded from the default run",
     "gpu: requires a CUDA device",
     "slow: takes more than ~5 seconds",

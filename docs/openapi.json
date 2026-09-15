@@ -1232,7 +1232,31 @@
           "provenance"
         ],
         "title": "ClassificationResponse",
-        "description": "Result of a single-image classification."
+        "description": "Result of a single-image classification.",
+        "example": {
+          "cached": false,
+          "correlation_id": "7b2f4c1e-9a3d-4f5b-8c6e-1d2a3b4c5d6e",
+          "inference_time_ms": 4.12,
+          "predictions": [
+            {
+              "class_id": 42,
+              "label": "tabby",
+              "probability": 0.8731,
+              "wnid": "n02123045"
+            },
+            {
+              "class_id": 43,
+              "label": "Egyptian cat",
+              "probability": 0.0642,
+              "wnid": "n02124075"
+            }
+          ],
+          "provenance": {
+            "backend": "onnx",
+            "model_name": "tiny-imagenet-classifier",
+            "model_version": "v1"
+          }
+        }
       },
       "ComponentHealth": {
         "properties": {
@@ -1384,7 +1408,43 @@
           "provenance"
         ],
         "title": "DetectionResponse",
-        "description": "Result of a single-image object detection."
+        "description": "Result of a single-image object detection.\n\nBoxes are in pixels of the image the caller uploaded, which the example\nmakes concrete: `image_width`/`image_height` are the uploaded dimensions,\nnot the 640x640 the model saw.",
+        "example": {
+          "cached": false,
+          "correlation_id": "7b2f4c1e-9a3d-4f5b-8c6e-1d2a3b4c5d6e",
+          "detections": [
+            {
+              "box": {
+                "x_max": 318.7,
+                "x_min": 12.4,
+                "y_max": 472.1,
+                "y_min": 54.9
+              },
+              "class_id": 15,
+              "confidence": 0.9481,
+              "label": "cat"
+            },
+            {
+              "box": {
+                "x_max": 402.3,
+                "x_min": 331.0,
+                "y_max": 448.2,
+                "y_min": 402.8
+              },
+              "class_id": 65,
+              "confidence": 0.7412,
+              "label": "remote"
+            }
+          ],
+          "image_height": 480,
+          "image_width": 640,
+          "inference_time_ms": 9.87,
+          "provenance": {
+            "backend": "onnx",
+            "model_name": "rtdetr-coco-detector",
+            "model_version": "v1"
+          }
+        }
       },
       "ErrorDetail": {
         "properties": {
@@ -1439,7 +1499,19 @@
           "error"
         ],
         "title": "ErrorResponse",
-        "description": "Envelope returned for every error."
+        "description": "Envelope returned for every error.\n\nEvery failure in the API renders through this one shape, including\nPydantic validation errors, which FastAPI would otherwise return in a\ndifferent format and force clients to parse twice.",
+        "example": {
+          "error": {
+            "code": "rate_limit_exceeded",
+            "correlation_id": "7b2f4c1e-9a3d-4f5b-8c6e-1d2a3b4c5d6e",
+            "details": {
+              "limit": 10,
+              "retry_after": 42,
+              "window_seconds": 60
+            },
+            "message": "Rate limit of 10 requests per minute exceeded for tier 'free'."
+          }
+        }
       },
       "HTTPValidationError": {
         "properties": {
@@ -1759,7 +1831,33 @@
           "provenance"
         ],
         "title": "SimilarityResponse",
-        "description": "Result of a similarity search."
+        "description": "Result of a similarity search.",
+        "example": {
+          "correlation_id": "7b2f4c1e-9a3d-4f5b-8c6e-1d2a3b4c5d6e",
+          "index_size": 20000,
+          "inference_time_ms": 3.41,
+          "provenance": {
+            "backend": "onnx",
+            "model_name": "tiny-imagenet-embedder",
+            "model_version": "v1"
+          },
+          "results": [
+            {
+              "class_id": 42,
+              "label": "tabby",
+              "rank": 1,
+              "reference": "train/n02123045/images/n02123045_113.JPEG",
+              "similarity": 0.8912
+            },
+            {
+              "class_id": 43,
+              "label": "Egyptian cat",
+              "rank": 2,
+              "reference": "train/n02124075/images/n02124075_9.JPEG",
+              "similarity": 0.8514
+            }
+          ]
+        }
       },
       "TaskType": {
         "type": "string",

@@ -9,9 +9,16 @@ caller from reaching internal services or local files through the worker.
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
-from api.models.responses import BatchJobStatusResponse, BoundingBox
+from api.models.responses import (
+    BatchJobStatusResponse,
+    BoundingBox,
+    ClassificationResponse,
+    DetectionResponse,
+    ErrorResponse,
+    SimilarityResponse,
+)
 from api.models.schemas import (
     BatchItem,
     BatchRequest,
@@ -173,3 +180,29 @@ class TestResponseHelpers:
             submitted_at=datetime.now(UTC),
         )
         assert response.progress == 1.0
+
+
+class TestDocumentedExamples:
+    """The examples rendered in /docs must be valid instances of their models.
+
+    An example is copied by readers and pasted into clients, so a wrong field
+    name there is worse than no example at all -- it is documentation that
+    actively misleads. Writing these by hand produced exactly that mistake
+    (`score` for what is really `similarity`), which is why it is checked
+    rather than reviewed.
+    """
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            ClassificationResponse,
+            DetectionResponse,
+            SimilarityResponse,
+            ErrorResponse,
+        ],
+    )
+    def test_example_validates_against_its_own_schema(self, model: type[BaseModel]) -> None:
+        example = model.model_json_schema().get("example")
+
+        assert example is not None, f"{model.__name__} documents no example"
+        model.model_validate(example)

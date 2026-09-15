@@ -55,6 +55,40 @@ class Prediction(ResponseModel):
 class ClassificationResponse(ResponseModel):
     """Result of a single-image classification."""
 
+    # A worked example, so /docs shows a real payload rather than a
+    # schema-generated placeholder of the right shape but implausible values.
+    # Readers calibrate expectations from examples; "string" and 0 teach
+    # nothing about what a probability distribution from this model looks like.
+    model_config = ConfigDict(
+        protected_namespaces=(),
+        json_schema_extra={
+            "example": {
+                "predictions": [
+                    {
+                        "label": "tabby",
+                        "class_id": 42,
+                        "wnid": "n02123045",
+                        "probability": 0.8731,
+                    },
+                    {
+                        "label": "Egyptian cat",
+                        "class_id": 43,
+                        "wnid": "n02124075",
+                        "probability": 0.0642,
+                    },
+                ],
+                "inference_time_ms": 4.12,
+                "correlation_id": "7b2f4c1e-9a3d-4f5b-8c6e-1d2a3b4c5d6e",
+                "provenance": {
+                    "model_name": "tiny-imagenet-classifier",
+                    "model_version": "v1",
+                    "backend": "onnx",
+                },
+                "cached": False,
+            }
+        },
+    )
+
     predictions: list[Prediction]
     inference_time_ms: float = Field(description="Preprocessing plus forward pass.")
     correlation_id: str
@@ -94,7 +128,54 @@ class Detection(ResponseModel):
 
 
 class DetectionResponse(ResponseModel):
-    """Result of a single-image object detection."""
+    """Result of a single-image object detection.
+
+    Boxes are in pixels of the image the caller uploaded, which the example
+    makes concrete: `image_width`/`image_height` are the uploaded dimensions,
+    not the 640x640 the model saw.
+    """
+
+    model_config = ConfigDict(
+        protected_namespaces=(),
+        json_schema_extra={
+            "example": {
+                "detections": [
+                    {
+                        "label": "cat",
+                        "class_id": 15,
+                        "confidence": 0.9481,
+                        "box": {
+                            "x_min": 12.4,
+                            "y_min": 54.9,
+                            "x_max": 318.7,
+                            "y_max": 472.1,
+                        },
+                    },
+                    {
+                        "label": "remote",
+                        "class_id": 65,
+                        "confidence": 0.7412,
+                        "box": {
+                            "x_min": 331.0,
+                            "y_min": 402.8,
+                            "x_max": 402.3,
+                            "y_max": 448.2,
+                        },
+                    },
+                ],
+                "image_width": 640,
+                "image_height": 480,
+                "inference_time_ms": 9.87,
+                "correlation_id": "7b2f4c1e-9a3d-4f5b-8c6e-1d2a3b4c5d6e",
+                "provenance": {
+                    "model_name": "rtdetr-coco-detector",
+                    "model_version": "v1",
+                    "backend": "onnx",
+                },
+                "cached": False,
+            }
+        },
+    )
 
     detections: list[Detection]
     image_width: int
@@ -169,6 +250,38 @@ class SimilarImage(ResponseModel):
 class SimilarityResponse(ResponseModel):
     """Result of a similarity search."""
 
+    model_config = ConfigDict(
+        protected_namespaces=(),
+        json_schema_extra={
+            "example": {
+                "results": [
+                    {
+                        "rank": 1,
+                        "similarity": 0.8912,
+                        "label": "tabby",
+                        "class_id": 42,
+                        "reference": "train/n02123045/images/n02123045_113.JPEG",
+                    },
+                    {
+                        "rank": 2,
+                        "similarity": 0.8514,
+                        "label": "Egyptian cat",
+                        "class_id": 43,
+                        "reference": "train/n02124075/images/n02124075_9.JPEG",
+                    },
+                ],
+                "index_size": 20000,
+                "inference_time_ms": 3.41,
+                "correlation_id": "7b2f4c1e-9a3d-4f5b-8c6e-1d2a3b4c5d6e",
+                "provenance": {
+                    "model_name": "tiny-imagenet-embedder",
+                    "model_version": "v1",
+                    "backend": "onnx",
+                },
+            }
+        },
+    )
+
     results: list[SimilarImage]
     index_size: int = Field(description="Number of images searched.")
     inference_time_ms: float
@@ -242,6 +355,25 @@ class ErrorDetail(ResponseModel):
 
 
 class ErrorResponse(ResponseModel):
-    """Envelope returned for every error."""
+    """Envelope returned for every error.
+
+    Every failure in the API renders through this one shape, including
+    Pydantic validation errors, which FastAPI would otherwise return in a
+    different format and force clients to parse twice.
+    """
+
+    model_config = ConfigDict(
+        protected_namespaces=(),
+        json_schema_extra={
+            "example": {
+                "error": {
+                    "code": "rate_limit_exceeded",
+                    "message": "Rate limit of 10 requests per minute exceeded for tier 'free'.",
+                    "details": {"limit": 10, "window_seconds": 60, "retry_after": 42},
+                    "correlation_id": "7b2f4c1e-9a3d-4f5b-8c6e-1d2a3b4c5d6e",
+                }
+            }
+        },
+    )
 
     error: ErrorDetail
