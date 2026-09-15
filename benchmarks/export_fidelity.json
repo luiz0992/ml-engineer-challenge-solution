@@ -1,0 +1,24 @@
+{
+  "classifier": {
+    "max_abs_diff": 3.073364496231079e-06,
+    "compared_against": "timm forward pass",
+    "tolerance": 0.0001,
+    "within_tolerance": true,
+    "artifact_mb": 87.9
+  },
+  "embedder": {
+    "max_abs_diff": 2.682209014892578e-07,
+    "compared_against": "backbone with L2 normalisation",
+    "embedding_dim": 384,
+    "tolerance": 0.0001,
+    "within_tolerance": true,
+    "artifact_mb": 87.8
+  },
+  "detector": {
+    "max_abs_diff": 3.6098062992095947e-06,
+    "compared_against": "PekingU/rtdetr_r18vd_coco_o365 with sigmoid applied",
+    "tolerance": 0.001,
+    "within_tolerance": true,
+    "artifact_mb": 84.3
+  }
+}

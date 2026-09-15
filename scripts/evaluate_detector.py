@@ -62,10 +62,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="instances_val2017.json (located automatically if omitted)",
     )
+    parser.add_argument(
+        "--model",
+        default="detector_fp32.onnx",
+        help="ONNX file under <artifacts-dir>/onnx to evaluate, e.g. detector_int8.onnx",
+    )
     parser.add_argument("--limit", type=int, default=0, help="Images to evaluate; 0 = all")
     parser.add_argument("--score-threshold", type=float, default=DEFAULT_SCORE_THRESHOLD)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--output", type=Path, default=Path("benchmarks/detection_eval.json"))
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help=(
+            "Report path. Defaults to benchmarks/detection_eval.json for the FP32 "
+            "model and benchmarks/detection_eval_<suffix>.json otherwise, so "
+            "evaluating a quantized model cannot overwrite the FP32 report."
+        ),
+    )
     parser.add_argument(
         "--probe-off-distribution",
         action="store_true",
@@ -196,8 +210,13 @@ def run_detections(
 
     from api.utils.image_processing import boxes_to_absolute, preprocess_for_detection
 
+    model_path = artifacts_dir / "onnx" / args.model
+    if not model_path.exists():
+        raise SystemExit(f"Model not found: {model_path}")
+
+    logger.info("Evaluating %s", model_path)
     session, input_name = create_session(
-        str(artifacts_dir / "onnx" / "detector_fp32.onnx"),
+        str(model_path),
         providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
     )
 
@@ -265,6 +284,11 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s", datefmt="%H:%M:%S"
     )
 
+    if args.output is None:
+        stem = Path(args.model).stem.removeprefix("detector_")
+        suffix = "" if stem == "fp32" else f"_{stem}"
+        args.output = Path(f"benchmarks/detection_eval{suffix}.json")
+
     from pycocotools.coco import COCO
     from pycocotools.cocoeval import COCOeval
 
@@ -330,6 +354,7 @@ def main(argv: list[str] | None = None) -> int:
 
     stats = evaluator.stats
     report = {
+        "model": args.model,
         "num_images": len(image_records),
         "num_detections": len(detections),
         "score_threshold": args.score_threshold,

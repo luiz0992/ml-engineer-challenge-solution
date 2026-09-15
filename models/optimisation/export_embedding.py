@@ -69,6 +69,36 @@ class IndexMetadata:
         }
 
 
+def build_normalised_embedder(backbone: Any) -> Any:
+    """Wrap a backbone so it emits unit-norm embeddings.
+
+    Module level rather than nested inside the exporter, so verification can
+    construct exactly the transformation that was exported. When this lived
+    inside `export_embedding_onnx` it was unreachable, and a verifier written
+    against the bare backbone compared un-normalised features to normalised
+    ones -- reporting a max difference of 7.59 between vectors that cannot
+    differ by more than 2.0, which is a broken harness rather than a broken
+    artefact.
+
+    L2 normalisation is baked into the graph so the serving code cannot forget
+    it: an un-normalised query against a normalised index ranks by magnitude
+    rather than similarity.
+    """
+    import torch
+    from torch import nn
+
+    class _NormalisedEmbedder(nn.Module):
+        def __init__(self, inner: nn.Module) -> None:
+            super().__init__()
+            self.backbone = inner
+
+        def forward(self, images: torch.Tensor) -> torch.Tensor:
+            features = self.backbone(images)
+            return torch.nn.functional.normalize(features, p=2.0, dim=-1)
+
+    return _NormalisedEmbedder(backbone)
+
+
 def build_embedding_model(run_dir: Path) -> tuple[Any, dict[str, Any]]:
     """Rebuild the fine-tuned backbone with its classifier head removed.
 
@@ -127,24 +157,11 @@ def export_embedding_onnx(
     rankings ordered by vector magnitude rather than similarity.
     """
     import torch
-    from torch import nn
 
     from models.optimisation.export import ExportError
 
     model, metadata = build_embedding_model(run_dir)
-
-    class NormalisedEmbedder(nn.Module):
-        """Wraps the backbone to emit unit-norm embeddings."""
-
-        def __init__(self, backbone: nn.Module) -> None:
-            super().__init__()
-            self.backbone = backbone
-
-        def forward(self, images: torch.Tensor) -> torch.Tensor:
-            features = self.backbone(images)
-            return torch.nn.functional.normalize(features, p=2.0, dim=-1)
-
-    wrapper = NormalisedEmbedder(model).eval()
+    wrapper = build_normalised_embedder(model).eval()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     size = metadata["image_size"]

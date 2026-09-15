@@ -42,6 +42,10 @@ models/artifacts/*
 *.engine
 *.plan
 *.index
+# ONNX external-tensor sidecars. quantize.py sweeps the ones its toolchain
+# leaves behind; this is the backstop for any it does not.
+*.data
+sym_shape_infer_temp.onnx
 
 # Benchmark *reports* are committed (they are deliverables); raw traces are not.
 benchmarks/raw/

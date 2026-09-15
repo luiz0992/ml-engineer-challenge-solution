@@ -1,0 +1,20 @@
+{
+  "model": "detector_int8.onnx",
+  "num_images": 1000,
+  "num_detections": 246210,
+  "score_threshold": 0.01,
+  "metrics": {
+    "mAP@[.5:.95]": 0.0632,
+    "mAP@0.5": 0.088,
+    "mAP@0.75": 0.0633,
+    "mAP_small": 0.0,
+    "mAP_medium": 0.024,
+    "mAP_large": 0.149,
+    "AR@1": 0.0933,
+    "AR@10": 0.113,
+    "AR@100": 0.1272,
+    "AR_small": 0.0,
+    "AR_medium": 0.0264,
+    "AR_large": 0.3114
+  }
+}

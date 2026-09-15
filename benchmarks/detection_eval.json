@@ -1,4 +1,5 @@
 {
+  "model": "detector_fp32.onnx",
   "num_images": 1000,
   "num_detections": 250166,
   "score_threshold": 0.01,

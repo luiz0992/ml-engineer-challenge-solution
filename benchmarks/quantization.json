@@ -1,0 +1,21 @@
+{
+  "classifier": {
+    "metric": "top-1 accuracy",
+    "fp32": 0.8725,
+    "int8": 0.8185,
+    "num_samples": 2000.0
+  },
+  "embedder": {
+    "metric": "recall@k against the FP32 index",
+    "mean_cosine_similarity": 0.7174485921859741,
+    "recall_at_k": 0.5053,
+    "top_k": 5.0,
+    "num_samples": 2000.0
+  },
+  "detector": {
+    "metric": "COCO mAP@[.5:.95]",
+    "source": "benchmarks/detection_eval_int8.json",
+    "note": "Produced by scripts/evaluate_detector.py --model detector_int8.onnx; mAP requires annotations and pycocotools, so it is not computed here.",
+    "measured": true
+  }
+}
