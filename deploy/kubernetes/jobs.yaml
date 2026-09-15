@@ -31,7 +31,10 @@ spec:
             runAsUser: 1001
           containers:
             - name: maintenance
-              image: mlchal-api:latest
+              # Same image as the drift job. Partition maintenance needs no
+              # scipy, but one image for both scheduled jobs is one thing to
+              # build, tag and roll rather than two.
+              image: mlchal-jobs:latest
               envFrom:
                 - configMapRef:
                     name: ml-api-config
@@ -63,7 +66,12 @@ spec:
             runAsUser: 1001
           containers:
             - name: drift
-              image: mlchal-api:latest
+              # The jobs image, not the API image: `analyse_drift` runs a
+              # Kolmogorov-Smirnov test and needs scipy, which is deliberately
+              # absent from the serving layer. Fixing this in Compose and not
+              # here would leave the same crash on the deployment target that
+              # actually schedules it.
+              image: mlchal-jobs:latest
               envFrom:
                 - configMapRef:
                     name: ml-api-config

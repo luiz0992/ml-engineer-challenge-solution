@@ -470,11 +470,15 @@ jobs:
         # one-shot job.
         run: |
           set -euo pipefail
-          JWT_SECRET_KEY=ci POSTGRES_PASSWORD=ci docker compose config > /tmp/rendered.yml
+          # --format json so the check needs only the standard library. The
+          # docker job never runs `uv sync`, so importing PyYAML here would
+          # depend on whatever the runner image happens to ship.
+          JWT_SECRET_KEY=ci POSTGRES_PASSWORD=ci \
+            docker compose config --format json > /tmp/rendered.json
           python - <<'PYTHON'
-          import sys, yaml
+          import json, sys
 
-          services = yaml.safe_load(open("/tmp/rendered.yml"))["services"]
+          services = json.load(open("/tmp/rendered.json"))["services"]
           inherits_healthcheck = {"ml-api", "worker"}
           one_shot = {"migrate"}
 
