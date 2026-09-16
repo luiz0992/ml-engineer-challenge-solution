@@ -4,8 +4,11 @@ Skipped unless ``E2E_BASE_URL`` is set, so the default unit/integration run
 stays fast and artefact-free. CI's docker job starts Compose and exports
 the variable.
 
-Self-contained: does not import ``api`` or ``tests.conftest``, so it can run
-in a slim image that only has httpx, pytest, pillow, and numpy.
+Self-contained: nothing here imports ``api`` or ``tests.conftest``, so CI can
+run it in a slim image holding only httpx, pytest, pillow, and numpy. That
+only holds if this directory is mounted *alone* — pytest loads every
+conftest.py between its rootdir and the test file, and the suite's top-level
+conftest imports the full serving stack.
 """
 
 from __future__ import annotations

@@ -563,6 +563,12 @@ jobs:
       - name: Apply Kubernetes manifests
         run: |
           set -euo pipefail
+          # The namespace is created for real before anything is dry-run.
+          # `--dry-run=server` never persists the Namespace it validates, so
+          # every namespaced resource in the same file is then rejected with
+          # "namespaces \"ml-api\" not found" — the manifests are fine, the
+          # ordering was not.
+          kubectl create namespace ml-api --dry-run=client -o yaml | kubectl apply -f -
           kubectl apply -f deploy/kubernetes/api.yaml --dry-run=server
           kubectl apply -f deploy/kubernetes/jobs.yaml --dry-run=server
           kubectl apply -f deploy/kubernetes/
@@ -602,10 +608,16 @@ jobs:
           done
           curl -fsS http://127.0.0.1:8080/api/v1/health
 
+          # Only `tests/e2e` is mounted, not the repository. pytest loads every
+          # conftest.py between the rootdir and the test file, and the suite's
+          # top-level `tests/conftest.py` imports `api.config` — which would
+          # drag pydantic, fastapi and onnxruntime into an image deliberately
+          # holding four packages. Mounting the leaf directory is what makes
+          # these tests self-contained rather than merely claiming to be.
           docker run --rm --network host \
             -e E2E_BASE_URL=http://127.0.0.1:8080 \
-            -v "$PWD:/src" -w /src \
+            -v "$PWD/tests/e2e:/e2e:ro" -w /tmp \
             python:3.12-slim-bookworm \
-            bash -c "pip install -q httpx pytest pillow numpy && pytest tests/e2e -o addopts= -m e2e -v"
+            bash -c "pip install -q httpx pytest pillow numpy && pytest /e2e -v"
 
           docker compose --env-file /dev/null down -v
